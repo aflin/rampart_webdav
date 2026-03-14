@@ -48,6 +48,9 @@ var working_directory = process.scriptPath;
 var serverConf = {
     // Settings for file manager:
 
+    // required  for onlyoffice
+    bindAll: true,
+
     // dav endpoint
     appendMap: {
         "/dav/": {module: working_directory + '/apps/webdav/webdav.js'}

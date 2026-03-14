@@ -158,6 +158,11 @@ ONLYOFFICE enables in-browser editing of Office documents (DOCX, XLSX, PPTX, ODS
 
    On startup, Rampart will detect the ONLYOFFICE container, extract the JWT secret and version prefix from the Docker configuration, and add the necessary proxy routes automatically.
 
+   The filemanager will be at, e.g., http://localhost:8088/filemanager/.
+
+   To mount it with davfs2 or in the MacOs finder, use:
+   https://yourserver.tld:8088/dav/username and provide name and password.
+
 ### Network Requirements
 
 The ONLYOFFICE container needs to connect back to Rampart to fetch and save documents. Since Docker containers have their own network, `localhost` inside the container does not reach the host machine. To handle this:
