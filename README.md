@@ -114,14 +114,29 @@ Built-in demo mode for public showcases:
    rampart web_server_conf.js start
    ```
 
-6. **Manage the server:**
+   If you use a port less than 1024, such as 80 or 443, the server must be started as root and `user` must be set in `web_server_conf.js`.
+
+   ```bash
+   sudo rampart web_server_conf.js start
+   ```
+
+   The filemanager will be at, e.g., http://localhost:8088/filemanager/.
+
+   Enabling the secure server options in `web_server_conf.js` is highly recommended,
+   especially for mounting it on your filesystem over the internet.
+
+   To mount it with davfs2 or in the MacOs finder, use:
+   https://yourserver.tld/dav/username and provide name and password.
+
+
+7. **Manage the server:**
    ```bash
    rampart web_server_conf.js stop       # stop the server
    rampart web_server_conf.js restart    # restart the server
    rampart web_server_conf.js status     # check if running
    ```
 
-7. **Command-line user administration** (can be used while the server is running):
+8. **Command-line user administration** (can be used while the server is running):
    ```bash
    rampart apps/webdav/webdav.js add <username> <password>    # create a user
    rampart apps/webdav/webdav.js del <username>               # delete a user
@@ -157,11 +172,6 @@ ONLYOFFICE enables in-browser editing of Office documents (DOCX, XLSX, PPTX, ODS
    ```
 
    On startup, Rampart will detect the ONLYOFFICE container, extract the JWT secret and version prefix from the Docker configuration, and add the necessary proxy routes automatically.
-
-   The filemanager will be at, e.g., http://localhost:8088/filemanager/.
-
-   To mount it with davfs2 or in the MacOs finder, use:
-   https://yourserver.tld:8088/dav/username and provide name and password.
 
 ### Network Requirements
 
