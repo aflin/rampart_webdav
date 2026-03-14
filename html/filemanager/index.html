@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="en" data-webdav-url="/dav/" data-theme="auto">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>File Manager</title>
+  <link rel="stylesheet" href="css/style.css">
+  <script src="js/filemanager.js" defer></script>
+</head>
+<body>
+
+  <!-- LOGIN SCREEN -->
+  <div class="login-screen" id="login-screen" hidden>
+    <form class="login-form" id="login-form">
+      <h1 class="login-title">File Manager</h1>
+      <div class="login-field">
+        <label for="login-user">Username</label>
+        <input type="text" id="login-user" name="username"
+               autocomplete="username" required>
+      </div>
+      <div class="login-field">
+        <label for="login-pass">Password</label>
+        <input type="password" id="login-pass" name="password"
+               autocomplete="current-password" required>
+      </div>
+      <div class="login-error" id="login-error" role="alert"></div>
+      <button type="submit" class="login-submit">Sign In</button>
+    </form>
+  </div>
+
+  <!-- MAIN APP (hidden until login) -->
+  <div class="app" id="app" hidden>
+
+    <!-- SIDEBAR -->
+    <aside class="sidebar" id="sidebar">
+      <div class="sidebar-header">
+        <span class="sidebar-title">Folders</span>
+        <button class="sidebar-toggle" id="sidebar-toggle"
+                title="Collapse sidebar" aria-label="Toggle sidebar"></button>
+      </div>
+      <nav class="tree" id="tree" role="tree" aria-label="Directory tree">
+      </nav>
+      <div class="sidebar-resize" id="sidebar-resize"></div>
+    </aside>
+
+    <!-- SIDEBAR OVERLAY (mobile backdrop) -->
+    <div class="sidebar-overlay" id="sidebar-overlay" hidden></div>
+
+    <!-- MAIN PANEL -->
+    <main class="main-panel" id="main-panel">
+
+      <!-- TOOLBAR -->
+      <div class="toolbar" id="toolbar">
+        <button class="toolbar-btn sidebar-hamburger" id="sidebar-hamburger"
+                aria-label="Open sidebar"></button>
+        <nav class="breadcrumb" id="breadcrumb" aria-label="Breadcrumb">
+        </nav>
+        <div class="toolbar-actions">
+          <button class="toolbar-btn sel-copy-btn" id="sel-copy"
+                  title="Copy" disabled></button>
+          <button class="toolbar-btn sel-cut-btn" id="sel-cut"
+                  title="Cut" disabled></button>
+          <button class="toolbar-btn sel-trash-btn" id="sel-trash"
+                  title="Move to trash" disabled></button>
+          <button class="toolbar-btn sel-restore-btn" id="sel-restore"
+                  title="Restore" disabled hidden></button>
+          <button class="toolbar-btn sel-delete-btn" id="sel-delete"
+                  title="Delete" disabled></button>
+          <button class="toolbar-btn sel-download-btn" id="sel-download"
+                  title="Download" disabled></button>
+          <div class="toolbar-sep"></div>
+          <button class="toolbar-btn dotfiles-toggle" id="dotfiles-toggle"
+                  title="Show hidden files" aria-label="Toggle hidden files"></button>
+          <button class="toolbar-btn view-toggle" id="view-toggle"
+                  title="Toggle view" aria-label="Toggle view"></button>
+          <div class="sort-control" id="sort-control">
+            <button class="toolbar-btn sort-btn" id="sort-btn"
+                    title="Sort by" aria-label="Sort by"></button>
+            <div class="sort-menu" id="sort-menu" hidden>
+              <button class="sort-option" data-sort="name">Name</button>
+              <button class="sort-option" data-sort="size">Size</button>
+              <button class="sort-option" data-sort="type">Type</button>
+              <button class="sort-option" data-sort="date">Modified</button>
+            </div>
+          </div>
+          <button class="toolbar-btn upload-btn" id="upload-btn"
+                  title="Upload files"></button>
+          <input type="file" id="file-input" multiple hidden>
+          <button class="toolbar-btn newfolder-btn" id="newfolder-btn"
+                  title="New folder"></button>
+          <button class="toolbar-btn newfile-btn" id="newfile-btn"
+                  title="New file"></button>
+          <button class="toolbar-btn empty-trash-btn" id="empty-trash-btn"
+                  title="Empty trash" hidden></button>
+          <button class="toolbar-btn terminal-btn" id="terminal-btn"
+                  title="Terminal" hidden></button>
+          <button class="toolbar-btn settings-btn" id="settings-btn"
+                  title="Settings"></button>
+          <button class="toolbar-btn logout-btn" id="logout-btn"
+                  title="Logout"></button>
+        </div>
+      </div>
+
+      <!-- PASTE BAR (shown when clipboard has items) -->
+      <div class="paste-bar" id="paste-bar" hidden>
+        <span class="paste-info" id="paste-info"></span>
+        <button class="paste-btn" id="paste-here">Paste Here</button>
+        <button class="paste-btn paste-cancel" id="paste-cancel">Cancel</button>
+      </div>
+
+      <!-- FILE LIST -->
+      <div class="file-list" id="file-list" role="grid" aria-label="File listing">
+      </div>
+
+      <!-- DROP ZONE OVERLAY -->
+      <div class="drop-zone" id="drop-zone" hidden>
+        <div class="drop-zone-inner">
+          <span class="drop-zone-icon"></span>
+          <span class="drop-zone-text">Drop files to upload</span>
+        </div>
+      </div>
+
+      <!-- UPLOAD PROGRESS -->
+      <div class="upload-progress" id="upload-progress" hidden>
+      </div>
+
+    </main>
+
+  </div>
+
+  <!-- MODAL OVERLAY (for viewers/editors/dialogs) -->
+  <div class="modal-overlay" id="modal-overlay" hidden>
+    <div class="modal" id="modal" role="dialog" aria-modal="true">
+      <div class="modal-header-trigger" id="modal-header-trigger"></div>
+      <div class="modal-header" id="modal-header">
+        <span class="modal-title" id="modal-title"></span>
+        <div class="modal-header-actions" id="modal-header-actions"></div>
+        <button class="modal-maximize" id="modal-maximize" aria-label="Maximize" title="Maximize"></button>
+        <button class="modal-close" id="modal-close" aria-label="Close"></button>
+      </div>
+      <div class="modal-body" id="modal-body">
+      </div>
+      <div class="modal-footer" id="modal-footer" hidden>
+      </div>
+    </div>
+  </div>
+
+  <!-- CONTEXT MENU -->
+  <div class="context-menu" id="context-menu" hidden role="menu">
+    <button class="ctx-item" data-action="open">Open</button>
+    <button class="ctx-item" data-action="edit-image" hidden>Edit Image</button>
+    <button class="ctx-item" data-action="edit-html" hidden>Edit HTML</button>
+    <button class="ctx-item" data-action="download">Download</button>
+    <hr class="ctx-separator">
+    <button class="ctx-item" data-action="rename">Rename</button>
+    <button class="ctx-item" data-action="copy">Copy</button>
+    <button class="ctx-item" data-action="cut">Cut</button>
+    <button class="ctx-item" data-action="paste">Paste</button>
+    <button class="ctx-item" data-action="create-link">Create Symlink</button>
+    <button class="ctx-item" data-action="share">Share to Web</button>
+    <hr class="ctx-separator">
+    <button class="ctx-item ctx-trash" data-action="trash">Move to Trash</button>
+    <button class="ctx-item" data-action="restore" hidden>Restore</button>
+    <button class="ctx-item ctx-danger" data-action="delete">Delete</button>
+    <hr class="ctx-separator">
+    <button class="ctx-item" data-action="info">Info</button>
+    <hr class="ctx-separator ctx-archive-sep">
+    <div class="ctx-item ctx-archive-parent" data-action="create-archive">
+      Create Archive &#9656;
+      <div class="ctx-submenu" id="ctx-archive-sub">
+        <button class="ctx-sub-item" data-arc-format="zip">Zip (.zip)</button>
+        <button class="ctx-sub-item" data-arc-format="tar.gz">Tar/Gzip (.tar.gz)</button>
+      </div>
+    </div>
+    <hr class="ctx-separator ctx-playlist-sep" hidden>
+    <div class="ctx-item ctx-playlist-parent" data-action="add-to-playlist" hidden>
+      Add to Playlist &#9656;
+      <div class="ctx-submenu" id="ctx-playlist-sub"></div>
+    </div>
+  </div>
+
+</body>
+</html>

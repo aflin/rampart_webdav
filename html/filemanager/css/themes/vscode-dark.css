@@ -1,0 +1,29 @@
+/* VS Code Dark Theme */
+:root {
+  --color-bg:            #1e1e1e;
+  --color-bg-secondary:  #252526;
+  --color-bg-hover:      #2a2d2e;
+  --color-bg-selected:   #37373d;
+  --color-bg-active:     #474747;
+  --color-fg:            #d4d4d4;
+  --color-fg-secondary:  #b0b0b0;
+  --color-fg-muted:      #808080;
+  --color-border:        #3c3c3c;
+  --color-border-light:  #2d2d2d;
+  --color-accent:        #569cd6;
+  --color-accent-hover:  #4a8abf;
+  --color-accent-fg:     #1e1e1e;
+  --color-danger:        #f44747;
+  --color-danger-bg:     #3b1e1e;
+  --color-success:       #6a9955;
+  --color-success-bg:    #1e2e1e;
+  --color-warning:       #dcdcaa;
+  --color-warning-bg:    #332e1e;
+  --color-modal-bg:      #252526;
+  --color-modal-header:  #2d2d2d;
+  --color-modal-border:  #3c3c3c;
+
+  --shadow-sm:  0 1px 2px rgba(0,0,0,0.4);
+  --shadow-md:  0 4px 12px rgba(0,0,0,0.5);
+  --shadow-lg:  0 8px 24px rgba(0,0,0,0.6);
+}

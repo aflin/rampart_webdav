@@ -1,0 +1,22 @@
+/* Solarized Light Theme */
+:root {
+  --color-bg:            #fdf6e3;
+  --color-bg-secondary:  #eee8d5;
+  --color-bg-hover:      #e6dfca;
+  --color-bg-selected:   #d9d2be;
+  --color-bg-active:     #cec7b2;
+  --color-fg:            #657b83;
+  --color-fg-secondary:  #839496;
+  --color-fg-muted:      #93a1a1;
+  --color-border:        #d3cbaf;
+  --color-border-light:  #e0d8c0;
+  --color-accent:        #268bd2;
+  --color-accent-hover:  #1a6fa8;
+  --color-accent-fg:     #fdf6e3;
+  --color-danger:        #dc322f;
+  --color-danger-bg:     #fce4e3;
+  --color-success:       #859900;
+  --color-success-bg:    #e8eecc;
+  --color-warning:       #b58900;
+  --color-warning-bg:    #f5ecc8;
+}

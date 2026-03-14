@@ -1,0 +1,29 @@
+/* Material Dark Theme */
+:root {
+  --color-bg:            #263238;
+  --color-bg-secondary:  #1e272c;
+  --color-bg-hover:      #2e3c43;
+  --color-bg-selected:   #37474f;
+  --color-bg-active:     #455a64;
+  --color-fg:            #eeffff;
+  --color-fg-secondary:  #b0bec5;
+  --color-fg-muted:      #78909c;
+  --color-border:        #37474f;
+  --color-border-light:  #2e3c43;
+  --color-accent:        #82aaff;
+  --color-accent-hover:  #6a8fd8;
+  --color-accent-fg:     #263238;
+  --color-danger:        #f07178;
+  --color-danger-bg:     #3b2528;
+  --color-success:       #c3e88d;
+  --color-success-bg:    #2a3325;
+  --color-warning:       #ffcb6b;
+  --color-warning-bg:    #3a3425;
+  --color-modal-bg:      #1e272c;
+  --color-modal-header:  #263238;
+  --color-modal-border:  #37474f;
+
+  --shadow-sm:  0 1px 2px rgba(0,0,0,0.4);
+  --shadow-md:  0 4px 12px rgba(0,0,0,0.5);
+  --shadow-lg:  0 8px 24px rgba(0,0,0,0.6);
+}

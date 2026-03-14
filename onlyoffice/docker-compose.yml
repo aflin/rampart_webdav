@@ -1,0 +1,13 @@
+services:
+  documentserver:
+    image: onlyoffice/documentserver
+    container_name: onlyoffice
+    ports:
+      - "6659:80"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      - JWT_SECRET=your-secret-key-change-me
+      - SECURE_LINK_SECRET=verysecretstring
+      - HASH=0
+    restart: unless-stopped

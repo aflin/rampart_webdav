@@ -1,0 +1,29 @@
+/* Solarized Dark Theme */
+:root {
+  --color-bg:            #002b36;
+  --color-bg-secondary:  #073642;
+  --color-bg-hover:      #0a4050;
+  --color-bg-selected:   #0d4f5e;
+  --color-bg-active:     #1a5c6b;
+  --color-fg:            #839496;
+  --color-fg-secondary:  #657b83;
+  --color-fg-muted:      #586e75;
+  --color-border:        #2a4e58;
+  --color-border-light:  #1e3a42;
+  --color-accent:        #268bd2;
+  --color-accent-hover:  #2aa0e8;
+  --color-accent-fg:     #fdf6e3;
+  --color-danger:        #dc322f;
+  --color-danger-bg:     #3b1a1a;
+  --color-success:       #859900;
+  --color-success-bg:    #1a2600;
+  --color-warning:       #b58900;
+  --color-warning-bg:    #2d2200;
+  --color-modal-bg:      #073642;
+  --color-modal-header:  #0a4050;
+  --color-modal-border:  #2a4e58;
+
+  --shadow-sm:  0 1px 2px rgba(0,0,0,0.4);
+  --shadow-md:  0 4px 12px rgba(0,0,0,0.5);
+  --shadow-lg:  0 8px 24px rgba(0,0,0,0.6);
+}

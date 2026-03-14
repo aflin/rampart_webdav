@@ -1,0 +1,25 @@
+/* Easy Reading Theme — low contrast, gentle on the eyes */
+:root {
+  --color-bg:            #ffffff;
+  --color-bg-secondary:  #f8f8f8;
+  --color-bg-hover:      #e4edeb;
+  --color-bg-selected:   #d6e6e2;
+  --color-bg-active:     #c8ddd8;
+  --color-fg:            #3a4a46;
+  --color-fg-secondary:  #5a6e68;
+  --color-fg-muted:      #7a908a;
+  --color-border:        #c4d5d1;
+  --color-border-light:  #d8e5e2;
+  --color-accent:        #4a8f80;
+  --color-accent-hover:  #3d7a6d;
+  --color-accent-fg:     #ffffff;
+  --color-danger:        #b05050;
+  --color-danger-bg:     #f0dada;
+  --color-success:       #4a8a55;
+  --color-success-bg:    #daf0de;
+  --color-warning:       #8a7535;
+  --color-warning-bg:    #f0e8d0;
+  --color-modal-bg:      #ffffff;
+  --color-modal-header:  #fbfffe;
+  --color-modal-border:  #a8ccc6;
+}

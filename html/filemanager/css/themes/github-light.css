@@ -1,0 +1,25 @@
+/* GitHub Light Theme */
+:root {
+  --color-bg:            #ffffff;
+  --color-bg-secondary:  #f6f8fa;
+  --color-bg-hover:      #ebeef1;
+  --color-bg-selected:   #dce5ed;
+  --color-bg-active:     #cdd8e3;
+  --color-fg:            #1f2328;
+  --color-fg-secondary:  #59636e;
+  --color-fg-muted:      #818b98;
+  --color-border:        #d1d9e0;
+  --color-border-light:  #e1e7ec;
+  --color-accent:        #0969da;
+  --color-accent-hover:  #0550ae;
+  --color-accent-fg:     #ffffff;
+  --color-danger:        #d1242f;
+  --color-danger-bg:     #ffebe9;
+  --color-success:       #1a7f37;
+  --color-success-bg:    #dafbe1;
+  --color-warning:       #9a6700;
+  --color-warning-bg:    #fff8c5;
+  --color-modal-bg:      #ffffff;
+  --color-modal-header:  #f6f8fa;
+  --color-modal-border:  #d1d9e0;
+}

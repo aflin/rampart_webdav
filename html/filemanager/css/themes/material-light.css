@@ -1,0 +1,25 @@
+/* Material Light Theme */
+:root {
+  --color-bg:            #fafafa;
+  --color-bg-secondary:  #f2f2f2;
+  --color-bg-hover:      #e8e8e8;
+  --color-bg-selected:   #dcdcdc;
+  --color-bg-active:     #d0d0d0;
+  --color-fg:            #212121;
+  --color-fg-secondary:  #616161;
+  --color-fg-muted:      #9e9e9e;
+  --color-border:        #d8d8d8;
+  --color-border-light:  #e8e8e8;
+  --color-accent:        #6182b8;
+  --color-accent-hover:  #4e6c99;
+  --color-accent-fg:     #ffffff;
+  --color-danger:        #e53935;
+  --color-danger-bg:     #fde8e8;
+  --color-success:       #43a047;
+  --color-success-bg:    #e2f3e3;
+  --color-warning:       #f9a825;
+  --color-warning-bg:    #fef3d5;
+  --color-modal-bg:      #ffffff;
+  --color-modal-header:  #f2f2f2;
+  --color-modal-border:  #d8d8d8;
+}

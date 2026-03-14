@@ -1,0 +1,29 @@
+/* One Dark Theme */
+:root {
+  --color-bg:            #282c34;
+  --color-bg-secondary:  #21252b;
+  --color-bg-hover:      #2c313a;
+  --color-bg-selected:   #3a3f4b;
+  --color-bg-active:     #4b5263;
+  --color-fg:            #abb2bf;
+  --color-fg-secondary:  #9da5b4;
+  --color-fg-muted:      #636d83;
+  --color-border:        #3e4452;
+  --color-border-light:  #2c313a;
+  --color-accent:        #61afef;
+  --color-accent-hover:  #528bcc;
+  --color-accent-fg:     #282c34;
+  --color-danger:        #e06c75;
+  --color-danger-bg:     #3b2a2d;
+  --color-success:       #98c379;
+  --color-success-bg:    #2a3325;
+  --color-warning:       #e5c07b;
+  --color-warning-bg:    #3a3425;
+  --color-modal-bg:      #21252b;
+  --color-modal-header:  #282c34;
+  --color-modal-border:  #3e4452;
+
+  --shadow-sm:  0 1px 2px rgba(0,0,0,0.4);
+  --shadow-md:  0 4px 12px rgba(0,0,0,0.5);
+  --shadow-lg:  0 8px 24px rgba(0,0,0,0.6);
+}

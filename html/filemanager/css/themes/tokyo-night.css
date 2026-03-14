@@ -1,0 +1,29 @@
+/* Tokyo Night Theme */
+:root {
+  --color-bg:            #1a1b26;
+  --color-bg-secondary:  #16161e;
+  --color-bg-hover:      #232433;
+  --color-bg-selected:   #2a2b3d;
+  --color-bg-active:     #33354a;
+  --color-fg:            #c0caf5;
+  --color-fg-secondary:  #a9b1d6;
+  --color-fg-muted:      #565f89;
+  --color-border:        #2a2b3d;
+  --color-border-light:  #232433;
+  --color-accent:        #7aa2f7;
+  --color-accent-hover:  #6285d4;
+  --color-accent-fg:     #1a1b26;
+  --color-danger:        #f7768e;
+  --color-danger-bg:     #31202a;
+  --color-success:       #9ece6a;
+  --color-success-bg:    #222e1c;
+  --color-warning:       #e0af68;
+  --color-warning-bg:    #302c1e;
+  --color-modal-bg:      #16161e;
+  --color-modal-header:  #1a1b26;
+  --color-modal-border:  #2a2b3d;
+
+  --shadow-sm:  0 1px 2px rgba(0,0,0,0.5);
+  --shadow-md:  0 4px 12px rgba(0,0,0,0.6);
+  --shadow-lg:  0 8px 24px rgba(0,0,0,0.7);
+}

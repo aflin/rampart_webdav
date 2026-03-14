@@ -1,0 +1,29 @@
+/* Monokai Theme */
+:root {
+  --color-bg:            #272822;
+  --color-bg-secondary:  #1e1f1a;
+  --color-bg-hover:      #33342c;
+  --color-bg-selected:   #3e3d32;
+  --color-bg-active:     #4e4d42;
+  --color-fg:            #f8f8f2;
+  --color-fg-secondary:  #cfcfc2;
+  --color-fg-muted:      #75715e;
+  --color-border:        #3e3d32;
+  --color-border-light:  #33342c;
+  --color-accent:        #66d9ef;
+  --color-accent-hover:  #52b8cc;
+  --color-accent-fg:     #272822;
+  --color-danger:        #f92672;
+  --color-danger-bg:     #3b1a28;
+  --color-success:       #a6e22e;
+  --color-success-bg:    #283b1a;
+  --color-warning:       #e6db74;
+  --color-warning-bg:    #3a3825;
+  --color-modal-bg:      #1e1f1a;
+  --color-modal-header:  #272822;
+  --color-modal-border:  #3e3d32;
+
+  --shadow-sm:  0 1px 2px rgba(0,0,0,0.4);
+  --shadow-md:  0 4px 12px rgba(0,0,0,0.5);
+  --shadow-lg:  0 8px 24px rgba(0,0,0,0.6);
+}
