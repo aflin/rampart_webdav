@@ -51,9 +51,12 @@ if(global.serverConf && global.serverConf.dataRoot) {
     //run from command line.
     dataRoot = findDataRoot();
 }
+// Resolve symlinks so paths match /proc/mounts and other system lookups
+try { dataRoot = realPath(dataRoot) || dataRoot; } catch(e) {}
 
 var DAV_ROOT  = dataRoot + '/webdav_root';
 if (!stat(DAV_ROOT)) mkdir(DAV_ROOT);
+try { DAV_ROOT = realPath(DAV_ROOT) || DAV_ROOT; } catch(e) {}
 
 if(module && module.exports) {
     var DAV_PREFIX = '/dav';
@@ -215,6 +218,14 @@ var FFPROBE_PATH = (function() {
 })();
 var HAS_FFMPEG = !!FFMPEG_PATH;
 
+// Check if FUSE allow_other is available
+var FUSE_ALLOW_OTHER = (function() {
+    try {
+        var conf = bufferToString(readFile('/etc/fuse.conf'));
+        return /^\s*user_allow_other\s*$/m.test(conf);
+    } catch(e) { return false; }
+})();
+
 // rclone detection and mount infrastructure
 var RCLONE_DIR = dataRoot + '/.rclone';
 if (!stat(RCLONE_DIR)) mkdir(RCLONE_DIR);
@@ -222,14 +233,28 @@ if (!stat(RCLONE_DIR)) mkdir(RCLONE_DIR);
 var HAS_RCLONE = (function() {
     try {
         var res = shell('which rclone', {timeout: 2000});
-        return res.exitStatus === 0;
-    } catch(e) { return false; }
+        if (res.exitStatus === 0) return true;
+    } catch(e) {}
+    // Fallback: check standard locations
+    if (stat('/usr/bin/rclone')) return true;
+    if (stat('/usr/local/bin/rclone')) return true;
+    return false;
+})();
+
+var RCLONE_PATH = (function() {
+    try {
+        var res = shell('which rclone', {timeout: 2000});
+        if (res.exitStatus === 0) return res.stdout.trim();
+    } catch(e) {}
+    if (stat('/usr/bin/rclone')) return '/usr/bin/rclone';
+    if (stat('/usr/local/bin/rclone')) return '/usr/local/bin/rclone';
+    return '';
 })();
 
 var RCLONE_VERSION = '';
 if (HAS_RCLONE) {
     try {
-        var res = shell('rclone version 2>/dev/null', {timeout: 5000});
+        var res = shell((RCLONE_PATH || '/usr/bin/rclone') + ' version 2>/dev/null', {timeout: 5000});
         var m = res.stdout.match(/rclone v([\d.]+)/);
         if (m) RCLONE_VERSION = m[1];
     } catch(e) {}
@@ -267,49 +292,54 @@ function getUserMountDir(username, mountName, rootMount) {
 }
 
 // Check if a path appears as a mount point in /proc/mounts
-function _inProcMounts(mountPoint) {
-    try {
-        var res = shell('grep -q ' + _shellEscape(' ' + mountPoint + ' ') + ' /proc/mounts 2>/dev/null; echo $?',
-                        {timeout: 3000});
-        return res.stdout.trim() === '0';
-    } catch(e) {
-        return false;
-    }
-}
-
 function _isMounted(mountPoint) {
-    // First check /proc/mounts (works even for stale FUSE mounts)
-    if (_inProcMounts(mountPoint)) return true;
-    // Fallback to mountpoint command
+    // Check if mountPoint is a different filesystem than its parent
+    // (works cross-platform: Linux, macOS — no /proc or shell needed)
     try {
-        var res = shell('mountpoint -q ' + _shellEscape(mountPoint) + ' 2>/dev/null; echo $?',
-                        {timeout: 3000});
-        return res.stdout.trim() === '0';
+        var mpStat = stat(mountPoint);
+        if (!mpStat || !mpStat.isDirectory) return false;
+        var parentDir = mountPoint.replace(/\/[^\/]+\/?$/, '') || '/';
+        var parentStat = stat(parentDir);
+        if (!parentStat) return false;
+        return mpStat.dev !== parentStat.dev;
     } catch(e) {
         return false;
     }
 }
 
-// Detect stale FUSE mounts — in /proc/mounts but transport is dead.
+// Detect stale FUSE mounts — mounted but transport is dead.
 function _isStaleMount(mountPoint) {
-    if (!_inProcMounts(mountPoint)) return false;
+    if (!_isMounted(mountPoint)) return false;
+    // The mount point has a different dev, so it's a mount.
+    // Try to stat the mount point itself — if FUSE transport is dead, stat will throw or return false.
     try {
-        var res = shell('ls ' + _shellEscape(mountPoint) + ' 2>&1', {timeout: 5000});
-        if (res.exitStatus !== 0) return true;
-        return false;
+        // Re-stat the mount point; if the FUSE daemon is dead, this fails
+        var staleCheck = stat(mountPoint + '/.');
+        return !staleCheck;
     } catch(e) {
         return true;
+    }
+}
+
+// Detect platform for unmount command
+var IS_MACOS = rampart.buildPlatform.indexOf('Darwin') === 0;
+
+function _fuseUnmount(mountPoint, lazy) {
+    if (IS_MACOS) {
+        return exec("umount", {timeout: 10000}, mountPoint);
+    } else if (lazy) {
+        return exec("fusermount", {timeout: 10000}, "-uz", mountPoint);
+    } else {
+        return exec("fusermount", {timeout: 10000}, "-u", mountPoint);
     }
 }
 
 // Force-unmount a stale FUSE mount and remove the mount point.
 function _recoverStaleMount(mountPoint) {
     fprintf(stderr, "Recovering stale mount: %s\n", mountPoint);
-    try {
-        shell('fusermount -uz ' + _shellEscape(mountPoint) + ' 2>&1', {timeout: 10000});
-    } catch(e) {}
+    _fuseUnmount(mountPoint, true);
     // Give kernel a moment to release the mount
-    try { shell('sleep 0.5', {timeout: 2000}); } catch(e) {}
+    rampart.utils.sleep(0.5);
     try { rmdir(mountPoint); } catch(e) {}
 }
 
@@ -331,12 +361,13 @@ function rcloneMountRemote(username, mountName, remoteName, remotePath, extraFla
         }
     }
 
-    var cmd = (envPrefix || '') + 'rclone mount' +
+    var cmd = (envPrefix || '') + (RCLONE_PATH || 'rclone') + ' mount' +
         ' --config ' + _shellEscape(conf) +
         ' --vfs-cache-mode writes' +
         ' --dir-cache-time 5s' +
         ' --poll-interval 15s' +
         ' --vfs-write-back 5s' +
+        (FUSE_ALLOW_OTHER ? ' --allow-other' : '') +
         ' --daemon' +
         ' --daemon-wait 5s' +
         (extraFlags ? ' ' + extraFlags : '') +
@@ -345,12 +376,19 @@ function rcloneMountRemote(username, mountName, remoteName, remotePath, extraFla
 
     try {
         var res = shell(cmd, {timeout: 15000});
-        if (res.exitStatus !== 0) {
-            return {ok: false, error: (res.stderr || '').trim() || 'Mount failed (exit ' + res.exitStatus + ')'};
+        // Don't trust exit code — check if actually mounted (retry a few times)
+        for (var _mwait = 0; _mwait < 5; _mwait++) {
+            rampart.utils.sleep(1);
+            if (_isMounted(mountPoint)) return {ok: true};
         }
-        return {ok: true};
+        return {ok: false, error: 'Mount failed at ' + mountPoint + ': ' + ((res.stderr || '').trim() || 'not mounted after command completed')};
     } catch(e) {
-        return {ok: false, error: e.message || 'Mount command failed'};
+        // Command may have timed out but mount could still succeed
+        for (var _mwait2 = 0; _mwait2 < 5; _mwait2++) {
+            rampart.utils.sleep(1);
+            if (_isMounted(mountPoint)) return {ok: true};
+        }
+        return {ok: false, error: 'Mount failed at ' + mountPoint + ': ' + (e.message || 'command failed')};
     }
 }
 
@@ -363,9 +401,10 @@ function buildSftpMountEnv(creds) {
     var env = '';
     if (creds.pass) {
         try {
-            var obsRes = shell('rclone obscure ' + _shellEscape(creds.pass), {timeout: 5000});
-            if (obsRes.exitStatus === 0) {
-                env += 'RCLONE_SFTP_PASS=' + _shellEscape(trim(obsRes.stdout)) + ' ';
+            var obsRes = shell((RCLONE_PATH || 'rclone') + ' obscure ' + _shellEscape(creds.pass), {timeout: 5000});
+            var obsOut = trim(obsRes.stdout || '');
+            if (obsOut) {
+                env += 'RCLONE_SFTP_PASS=' + _shellEscape(obsOut) + ' ';
             }
         } catch(e) {}
     }
@@ -375,9 +414,10 @@ function buildSftpMountEnv(creds) {
         env += 'RCLONE_SFTP_KEY_PEM=' + _shellEscape(pemOneLine) + ' ';
         if (creds.key_file_pass) {
             try {
-                var obsRes2 = shell('rclone obscure ' + _shellEscape(creds.key_file_pass), {timeout: 5000});
-                if (obsRes2.exitStatus === 0) {
-                    env += 'RCLONE_SFTP_KEY_FILE_PASS=' + _shellEscape(trim(obsRes2.stdout)) + ' ';
+                var obsRes2 = shell((RCLONE_PATH || 'rclone') + ' obscure ' + _shellEscape(creds.key_file_pass), {timeout: 5000});
+                var obsOut2 = trim(obsRes2.stdout || '');
+                if (obsOut2) {
+                    env += 'RCLONE_SFTP_KEY_FILE_PASS=' + _shellEscape(obsOut2) + ' ';
                 }
             } catch(e) {}
         }
@@ -388,19 +428,20 @@ function buildSftpMountEnv(creds) {
 function rcloneUnmount(username, mountName, rootMount) {
     var mountPoint = getUserMountDir(username, mountName, rootMount);
 
-    try {
-        shell('fusermount -u ' + _shellEscape(mountPoint) + ' 2>&1', {timeout: 10000});
+    _fuseUnmount(mountPoint, false);
+    // Check if actually unmounted
+    if (!_isMounted(mountPoint)) {
         try { rmdir(mountPoint); } catch(e) {}
         return {ok: true};
-    } catch(e) {
-        try {
-            shell('fusermount -uz ' + _shellEscape(mountPoint) + ' 2>&1', {timeout: 5000});
-            try { rmdir(mountPoint); } catch(e2) {}
-            return {ok: true};
-        } catch(e2) {
-            return {ok: false, error: e2.message || 'Unmount failed'};
-        }
     }
+    // Lazy unmount as fallback
+    _fuseUnmount(mountPoint, true);
+    rampart.utils.sleep(0.5);
+    if (!_isMounted(mountPoint)) {
+        try { rmdir(mountPoint); } catch(e) {}
+        return {ok: true};
+    }
+    return {ok: false, error: 'Unmount failed'};
 }
 
 // Re-mount all active rclone mounts on server startup
@@ -600,7 +641,7 @@ function copyFileMetaRecursive(srcDavRel, destDavRel, destFsPath, newOwner) {
 }
 
 function deleteFileMetaRecursive(davRelPath, fsPath) {
-    // Walk filesystem before deletion and remove each entry
+    // Walk filesystem and remove each entry's metadata (must be called before rmdir)
     var entries = readdir(fsPath);
     if (entries) {
         for (var i = 0; i < entries.length; i++) {
@@ -2188,10 +2229,11 @@ function handleDELETE(req, davRelPath, fsPath) {
             deleteFileMeta(davRelPath);
             removeDeadProps(davRelPath);
         } else if (lst.isDirectory) {
-            rmdirRecursive(fsPath);
+            // Clean up metadata before deleting (needs to read directory)
             deleteFileMetaRecursive(davRelPath, fsPath);
             deleteThumbnailsRecursive(davRelPath);
             removeDeadPropsRecursive(davRelPath);
+            rmdirRecursive(fsPath);
         } else {
             rmFile(fsPath);
             deleteFileMeta(davRelPath);
@@ -4147,8 +4189,7 @@ function main_dispatch(req) {
             if (!sjob) return { status: 404, json: {ok: false, error: 'Job not found'} };
             var sjRunning = false;
             try {
-                var sjKill = shell('kill -0 ' + parseInt(sjob.pid) + ' 2>/dev/null; echo $?', {timeout: 2000});
-                sjRunning = (sjKill.stdout || '').trim() === '0';
+                sjRunning = kill(parseInt(sjob.pid), 0);
             } catch(e) {}
             var sjSize = 0;
             try { var sjSt = stat(sjob.tempPath); if (sjSt) sjSize = sjSt.size; } catch(e) {}
@@ -4189,7 +4230,7 @@ function main_dispatch(req) {
             var cjob = rampart.thread.get('archive_' + cjId);
             if (!cjob) return { status: 404, json: {ok: false, error: 'Job not found'} };
             // Kill the process tree (negative PID kills the process group)
-            try { shell('kill ' + parseInt(cjob.pid) + ' 2>/dev/null', {timeout: 3000}); } catch(e) {}
+            kill(parseInt(cjob.pid));
             // Remove partial output
             try { if (stat(cjob.tempPath)) rmFile(cjob.tempPath); } catch(e) {}
             rampart.thread.put('archive_' + cjId, null);
@@ -4278,17 +4319,15 @@ function main_dispatch(req) {
         }
         // Run synchronously first to capture errors, then if the file set is large
         // we can consider background later.  For now, test with shell() to see errors.
-        var arcResult;
         try {
-            arcResult = shell(arcCmd, {timeout: 300000});  // 5 minute timeout
-        } catch(e) {
-            return { status: 500, json: {ok: false, error: 'Failed to run archive: ' + e.message} };
-        }
+            shell(arcCmd, {timeout: 300000});  // 5 minute timeout
+        } catch(e) {}
 
-        if (arcResult.exitStatus !== 0) {
-            // Clean up temp file
+        // Verify the archive was created
+        var arcTempStat = stat(arcTempPath);
+        if (!arcTempStat || arcTempStat.size === 0) {
             try { if (stat(arcTempPath)) rmFile(arcTempPath); } catch(e2) {}
-            return { status: 500, json: {ok: false, error: 'Archive command failed (exit ' + arcResult.exitStatus + '): ' + (arcResult.stderr || '')} };
+            return { status: 500, json: {ok: false, error: 'Archive creation failed'} };
         }
 
         // Rename temp file to final destination
@@ -4418,7 +4457,6 @@ function main_dispatch(req) {
                     var rmMountPoint = getUserMountDir(rmUser.username, rmCfg.name, rmCfg.rootMount);
                     var rmMounted = _isMounted(rmMountPoint);
                     var rmStale = false;
-
                     // Detect and recover stale FUSE mounts
                     if (rmMounted && _isStaleMount(rmMountPoint)) {
                         fprintf(stderr, "Stale mount detected for '%s', recovering...\n", rmCfg.name);
@@ -4511,7 +4549,7 @@ function main_dispatch(req) {
             rcloneUnmount(crUser.username, crMountName, crExisting.rootMount);
             var crOldConf = getUserRcloneConf(crUser.username);
             try {
-                shell('rclone config delete --config ' + _shellEscape(crOldConf) + ' ' + _shellEscape(crMountName),
+                shell((RCLONE_PATH || 'rclone') + ' config delete --config ' + _shellEscape(crOldConf) + ' ' + _shellEscape(crMountName),
                       {timeout: 5000});
             } catch(e) {}
             db.del(rcloneDbi, crUser.username + '/' + crMountName);
@@ -4533,7 +4571,14 @@ function main_dispatch(req) {
         }
 
         var crConf = getUserRcloneConf(crUser.username);
-        var configCmd = 'rclone config create' +
+        var _crLog = process.scriptPath + '/create-debug.log';
+        fprintf(_crLog, true, "--- %s ---\n", new Date().toISOString());
+        fprintf(_crLog, true, "conf: %s\n", crConf);
+        fprintf(_crLog, true, "conf stat before config create: %s\n", JSON.stringify(stat(crConf)));
+        fprintf(_crLog, true, "tier: %s, provider: %s, mountName: %s\n", crTier, crProviderType, crMountName);
+        fprintf(_crLog, true, "token present: %s\n", !!(crParams && crParams.token));
+
+        var configCmd = (RCLONE_PATH || 'rclone') + ' config create' +
             ' --config ' + _shellEscape(crConf) +
             ' ' + _shellEscape(crMountName) +
             ' ' + _shellEscape(crProviderType);
@@ -4579,14 +4624,29 @@ function main_dispatch(req) {
             }
         }
 
-        try {
-            var configRes = shell(configCmd, {timeout: 15000});
-            if (configRes.exitStatus !== 0) {
-                return { status: 500, json: {ok: false, error: (configRes.stderr || '').trim() || 'Config creation failed'} };
+        if (crTier === 'oauth' && crParams.token) {
+            // Write rclone.conf directly for OAuth — rclone config create
+            // with token= is unreliable across rclone versions
+            var crTokenJson = JSON.stringify(crParams.token);
+            var crConfContent = '[' + crMountName + ']\ntype = ' + crProviderType + '\ntoken = ' + crTokenJson + '\n';
+            fprintf(_crLog, true, "oauth: writing rclone.conf directly\n");
+            var crFd = fopen(crConf, 'w');
+            fwrite(crFd, crConfContent);
+            fclose(crFd);
+        } else {
+            fprintf(_crLog, true, "configCmd: %s\n", configCmd.substring(0, 200));
+            try {
+                shell(configCmd, {timeout: 15000});
+            } catch(e) {}
+            // Verify the config was written
+            var crConfStat = stat(crConf);
+            if (!crConfStat || crConfStat.size === 0) {
+                fprintf(_crLog, true, "config create: conf file (%s) missing or empty\n", crConf);
+                return { status: 500, json: {ok: false, error: 'Config creation failed: ' + crConf + ' missing or empty'} };
             }
-        } catch(e) {
-            return { status: 500, json: {ok: false, error: e.message || 'Config creation failed'} };
         }
+
+        fprintf(_crLog, true, "conf stat before mount: %s\n", JSON.stringify(stat(crConf)));
 
         var crRemotePath = crParams.remotePath || '';
         // For SFTP, pass credentials via CLI flags (not in rclone.conf)
@@ -4594,7 +4654,9 @@ function main_dispatch(req) {
         if (crTier === 'sftp') {
             crSftpEnv = buildSftpMountEnv(sftpCreds);
         }
+        fprintf(_crLog, true, "calling rcloneMountRemote\n");
         var crMountResult = rcloneMountRemote(crUser.username, crMountName, crMountName, crRemotePath, '', crSftpEnv, crRootMount);
+        fprintf(_crLog, true, "mount result: %s\n", JSON.stringify(crMountResult));
 
         var crDavPath = crRootMount
             ? '/' + crMountName + '/'
@@ -4655,7 +4717,7 @@ function main_dispatch(req) {
 
         var delConf = getUserRcloneConf(delRcUser.username);
         try {
-            shell('rclone config delete --config ' + _shellEscape(delConf) + ' ' + _shellEscape(delMountName),
+            shell((RCLONE_PATH || 'rclone') + ' config delete --config ' + _shellEscape(delConf) + ' ' + _shellEscape(delMountName),
                   {timeout: 5000});
         } catch(e) {}
 
@@ -4724,6 +4786,33 @@ function main_dispatch(req) {
             status: 200,
             json: {ok: reResult.ok, error: reResult.error || null}
         }, reUser);
+    }
+
+    // POST /dav/_rclone/unmount — unmount without removing configuration
+    if (method === 'POST' && fullPath === DAV_PREFIX + '/_rclone/unmount') {
+        var umUser = authenticate(req);
+        if (!umUser) return { status: 401, json: {ok: false, error: 'Not authenticated'} };
+        if (!HAS_RCLONE) return { status: 400, json: {ok: false, error: 'rclone not available'} };
+
+        var umBody;
+        try { umBody = JSON.parse(bufferToString(req.body)); } catch(e) {
+            return { status: 400, json: {ok: false, error: 'Invalid JSON'} };
+        }
+
+        var umMountName = (umBody.name || '').trim();
+        var umKey = umUser.username + '/' + umMountName;
+        var umCfg = db.get(rcloneDbi, umKey);
+        if (!umCfg) return { status: 404, json: {ok: false, error: 'Mount not found'} };
+
+        var umResult = rcloneUnmount(umUser.username, umMountName, umCfg.rootMount);
+        // Set inactive so it won't auto-remount on login
+        umCfg.active = false;
+        db.put(rcloneDbi, umKey, umCfg);
+
+        return _attachCookie({
+            status: 200,
+            json: {ok: umResult.ok, error: umResult.error || null}
+        }, umUser);
     }
 
     // POST /dav/_rclone/remountAll — re-mount all unmounted SFTP mounts for a user
@@ -4797,11 +4886,36 @@ function main_dispatch(req) {
             return { status: 400, json: {ok: false, error: 'Invalid OAuth provider'} };
         }
 
+        // Check if another user has an active OAuth session (port 53682 is shared)
+        var oaAllSessions = db.get(rcloneDbi, "", 10000);
+        if (oaAllSessions && typeof oaAllSessions === 'object') {
+            var oaSessKeys = Object.keys(oaAllSessions);
+            for (var oasi = 0; oasi < oaSessKeys.length; oasi++) {
+                if (oaSessKeys[oasi].indexOf('_oauth_session/') !== 0) continue;
+                var oaSessUser = oaSessKeys[oasi].substring('_oauth_session/'.length);
+                if (oaSessUser === oaUser.username) continue;
+                var oaOtherSession = oaAllSessions[oaSessKeys[oasi]];
+                // Check if session is still active (less than 5 minutes old and process alive)
+                if (oaOtherSession && Date.now() - oaOtherSession.created < 300000 &&
+                    kill(parseInt(oaOtherSession.pid), 0)) {
+                    return _attachCookie({ status: 409, json: {
+                        ok: false,
+                        error: 'Another user is currently authorizing cloud storage. Please try again in a few minutes.'
+                    }}, oaUser);
+                }
+                // Stale session — clean it up
+                kill(parseInt(oaOtherSession.pid));
+                try { rmFile(oaOtherSession.stdoutFile); } catch(e) {}
+                try { rmFile(oaOtherSession.stderrFile); } catch(e) {}
+                db.del(rcloneDbi, oaSessKeys[oasi]);
+            }
+        }
+
         // Clean up any existing OAuth session for this user
         var oaOldSession = db.get(rcloneDbi, '_oauth_session/' + oaUser.username);
         if (oaOldSession && oaOldSession.pid) {
-            try { shell('kill ' + oaOldSession.pid + ' 2>/dev/null', {timeout: 3000}); } catch(e) {}
-            try { shell('rm -f ' + _shellEscape(oaOldSession.stdoutFile) + ' ' + _shellEscape(oaOldSession.stderrFile), {timeout: 2000}); } catch(e) {}
+            kill(parseInt(oaOldSession.pid));
+            try { rmFile(oaOldSession.stdoutFile); } catch(e) {} try { rmFile(oaOldSession.stderrFile); } catch(e) {}
         }
 
         // Generate session ID and temp file paths
@@ -4810,25 +4924,33 @@ function main_dispatch(req) {
         var oaStdout = oaDir + '/oauth_' + oaSid + '.stdout';
         var oaStderr = oaDir + '/oauth_' + oaSid + '.stderr';
 
-        // Start rclone authorize in background
+        // Start rclone authorize in a thread (keeps process alive)
         var oaConf = getUserRcloneConf(oaUser.username);
-        var oaBgCmd = 'rclone authorize ' + _shellEscape(oaProvider) +
+        var oaNoOpen = (RCLONE_VERSION && RCLONE_VERSION >= '1.53') ? ' --auth-no-open-browser' : '';
+        var _oaLog = process.scriptPath + '/oauth-debug.log';
+        var _oaThr = new rampart.thread();
+        var oaBgCmd = (RCLONE_PATH || 'rclone') + ' authorize ' + _shellEscape(oaProvider) +
             ' --config ' + _shellEscape(oaConf) +
-            ' --auth-no-open-browser' +
+            oaNoOpen +
             ' > ' + _shellEscape(oaStdout) +
-            ' 2> ' + _shellEscape(oaStderr) +
-            ' & echo $!';
-        var oaPid = '';
-        try {
-            var oaBgRes = shell(oaBgCmd, {timeout: 5000});
-            oaPid = oaBgRes.stdout.trim();
-        } catch(e) {
-            return { status: 500, json: {ok: false, error: 'Failed to start rclone authorize'} };
-        }
+            ' 2> ' + _shellEscape(oaStderr);
+        _oaThr.exec(function(cfg) {
+            var u = rampart.utils;
+            u.fprintf(cfg.log, true, "thread running: %s\n", cfg.cmd);
+            var res = u.shell(cfg.cmd, {timeout: 300000});
+            u.fprintf(cfg.log, true, "thread done: exit=%d\n", res.exitStatus);
+        }, {
+            cmd: oaBgCmd,
+            log: _oaLog
+        });
+        // Give rclone a moment to start its listener
+        rampart.utils.sleep(1);
+        var oaPid = 'thread';
 
-        // Wait for auth URL to appear in stderr (up to 10 seconds)
+        // Wait for auth URL to appear in stdout or stderr (up to 10 seconds)
         var oaWaitCmd = 'for i in $(seq 1 20); do ' +
-            'grep -oE "http://127\\.0\\.0\\.1:[0-9]+/auth\\?state=[^ ]*" ' + _shellEscape(oaStderr) + ' 2>/dev/null && break; ' +
+            'cat ' + _shellEscape(oaStderr) + ' ' + _shellEscape(oaStdout) + ' 2>/dev/null | ' +
+            'grep -ohE "http://127\\.0\\.0\\.1:[0-9]+/auth\\?state=[^ ]*" && break; ' +
             'sleep 0.5; done';
         var oaAuthUrl = '';
         try {
@@ -4836,11 +4958,24 @@ function main_dispatch(req) {
             oaAuthUrl = oaWaitRes.stdout.trim();
         } catch(e) {}
 
+        // Debug logging
+        fprintf(_oaLog, true, "--- %s ---\n", new Date().toISOString());
+        fprintf(_oaLog, true, "pid: %s\n", oaPid);
+        fprintf(_oaLog, true, "grepCmd: %s\n", oaWaitCmd);
+        fprintf(_oaLog, true, "authUrl: %s\n", oaAuthUrl);
+        if (oaAuthUrl) {
+            var _oaCurlCmd = 'curl -s -o /dev/null -w "%{redirect_url}" ' + _shellEscape(oaAuthUrl);
+            fprintf(_oaLog, true, "curlCmd: %s\n", _oaCurlCmd);
+        }
+        try { fprintf(_oaLog, true, "stderr: %s\n", bufferToString(readFile(oaStderr))); } catch(e) { fprintf(_oaLog, true, "stderr: MISSING\n"); }
+        try { fprintf(_oaLog, true, "stdout: %s\n", bufferToString(readFile(oaStdout))); } catch(e) { fprintf(_oaLog, true, "stdout: MISSING\n"); }
+        fprintf(_oaLog, true, "\n");
+
         if (!oaAuthUrl) {
-            try { shell('kill ' + oaPid + ' 2>/dev/null', {timeout: 2000}); } catch(e) {}
+            kill(parseInt(oaPid));
             var oaErrContent = '';
             try { oaErrContent = bufferToString(readFile(oaStderr)); } catch(e) {}
-            try { shell('rm -f ' + _shellEscape(oaStdout) + ' ' + _shellEscape(oaStderr), {timeout: 2000}); } catch(e) {}
+            try { rmFile(oaStdout); } catch(e) {} try { rmFile(oaStderr); } catch(e) {}
             return { status: 500, json: {ok: false, error: 'rclone authorize failed: ' + (oaErrContent || 'unknown error').substring(0, 200)} };
         }
 
@@ -4849,14 +4984,17 @@ function main_dispatch(req) {
         // rclone's listener returns a 302 redirect to the provider.
         var oaProviderUrl = '';
         try {
-            var oaRedirCmd = 'curl -s -o /dev/null -w "%{redirect_url}" ' + _shellEscape(oaAuthUrl);
+            var oaRedirCmd = '/usr/bin/curl -s -o /dev/null -w "%{redirect_url}" ' + _shellEscape(oaAuthUrl);
             var oaRedirRes = shell(oaRedirCmd, {timeout: 10000});
             oaProviderUrl = oaRedirRes.stdout.trim();
-        } catch(e) {}
+            fprintf(_oaLog, true, "curl exit=%d stdout='%s' stderr='%s'\n", oaRedirRes.exitStatus, oaRedirRes.stdout, oaRedirRes.stderr);
+        } catch(e) {
+            fprintf(_oaLog, true, "curl exception: %s\n", e.message || e);
+        }
 
         if (!oaProviderUrl) {
-            try { shell('kill ' + oaPid + ' 2>/dev/null', {timeout: 2000}); } catch(e) {}
-            try { shell('rm -f ' + _shellEscape(oaStdout) + ' ' + _shellEscape(oaStderr), {timeout: 2000}); } catch(e) {}
+            fprintf(_oaLog, true, "providerUrl empty, failing\n");
+            try { rmFile(oaStdout); } catch(e) {} try { rmFile(oaStderr); } catch(e) {}
             return { status: 500, json: {ok: false, error: 'Failed to get OAuth provider URL from rclone'} };
         }
 
@@ -4893,10 +5031,51 @@ function main_dispatch(req) {
         }
 
         // Relay the callback to rclone's local listener
+        var rlResp = curl.fetch(rlUrl, {returnText: true, "max-time": 10, location: true});
+        if (rlResp.status !== 200) {
+            return _attachCookie({ status: 502, json: {ok: false, error: 'Relay failed: ' + (rlResp.statusText || rlResp.status) + ' ' + (rlResp.errMsg || '')} }, rlUser);
+        }
+
+        // Wait for rclone to finish writing the token
+        var rlToken = null;
+        var rlConf = getUserRcloneConf(rlUser.username);
+
+        // First check: token might already be there
         try {
-            curl.fetch(rlUrl, {returnText: true, "max-time": 10, location: true});
-        } catch(e) {
-            // rclone may close the connection after processing — ignore errors
+            var rlConfContent = bufferToString(readFile(rlConf));
+            var rlTokens = rlConfContent.match(/token\s*=\s*(\{[^\n]+\})/g);
+            if (rlTokens && rlTokens.length > 0) {
+                var rlLastToken = rlTokens[rlTokens.length - 1].replace(/^token\s*=\s*/, '');
+                try { rlToken = JSON.parse(rlLastToken); } catch(e) {}
+            }
+        } catch(e) {}
+
+        // If not, wait and retry
+        if (!rlToken) {
+            for (var rlRetry = 0; rlRetry < 10; rlRetry++) {
+                rampart.utils.sleep(1);
+                try {
+                    var rlConfContent2 = bufferToString(readFile(rlConf));
+                    var rlTokens2 = rlConfContent2.match(/token\s*=\s*(\{[^\n]+\})/g);
+                    if (rlTokens2 && rlTokens2.length > 0) {
+                        var rlLastToken2 = rlTokens2[rlTokens2.length - 1].replace(/^token\s*=\s*/, '');
+                        try { rlToken = JSON.parse(rlLastToken2); } catch(e) {}
+                        if (rlToken) break;
+                    }
+                } catch(e) {}
+            }
+        }
+
+        if (rlToken) {
+            // Clean up oauth session
+            try {
+                var rlSession = db.get(rcloneDbi, '_oauth_session/' + rlUser.username);
+                if (rlSession) {
+                    try { rmFile(rlSession.stdoutFile); } catch(e) {} try { rmFile(rlSession.stderrFile); } catch(e) {}
+                    db.del(rcloneDbi, '_oauth_session/' + rlUser.username);
+                }
+            } catch(e) {}
+            return _attachCookie({ status: 200, json: {ok: true, token: rlToken} }, rlUser);
         }
 
         return _attachCookie({ status: 200, json: {ok: true} }, rlUser);
@@ -4914,36 +5093,60 @@ function main_dispatch(req) {
 
         // Check if session expired (10 min max)
         if (Date.now() - plSession.created > 600000) {
-            try { shell('kill ' + plSession.pid + ' 2>/dev/null', {timeout: 2000}); } catch(e) {}
-            try { shell('rm -f ' + _shellEscape(plSession.stdoutFile) + ' ' + _shellEscape(plSession.stderrFile), {timeout: 2000}); } catch(e) {}
+            kill(parseInt(plSession.pid));
+            try { rmFile(plSession.stdoutFile); } catch(e) {} try { rmFile(plSession.stderrFile); } catch(e) {}
             db.del(rcloneDbi, '_oauth_session/' + plUser.username);
             return _attachCookie({ status: 200, json: {ok: false, error: 'OAuth session expired'} }, plUser);
         }
 
-        // Read stdout file for token
+        // Read stdout file for token (method 1: rclone authorize output)
         var plContent = '';
         try { plContent = bufferToString(readFile(plSession.stdoutFile)); } catch(e) {}
 
+        var plToken = null;
         var plTokenMatch = plContent.match(/Paste the following into your remote machine --->\s*([\s\S]*?)\s*<---End paste/);
         if (plTokenMatch) {
-            var plTokenStr = plTokenMatch[1].trim();
-            var plToken = null;
-            try { plToken = JSON.parse(plTokenStr); } catch(e) {}
+            try { plToken = JSON.parse(plTokenMatch[1].trim()); } catch(e) {}
+        }
 
+        // Fallback: read token from rclone.conf (method 2: rclone writes directly to config)
+        if (!plToken) {
+            try {
+                var plConf = getUserRcloneConf(plUser.username);
+                var plConfContent = bufferToString(readFile(plConf));
+                // Find the most recently added section's token
+                var plConfTokens = plConfContent.match(/token\s*=\s*(\{[^\n]+\})/g);
+                if (plConfTokens && plConfTokens.length > 0) {
+                    var plLastToken = plConfTokens[plConfTokens.length - 1].replace(/^token\s*=\s*/, '');
+                    try { plToken = JSON.parse(plLastToken); } catch(e) {}
+                }
+            } catch(e) {}
+        }
+
+        if (plToken) {
             // Clean up
-            try { shell('kill ' + plSession.pid + ' 2>/dev/null', {timeout: 2000}); } catch(e) {}
-            try { shell('rm -f ' + _shellEscape(plSession.stdoutFile) + ' ' + _shellEscape(plSession.stderrFile), {timeout: 2000}); } catch(e) {}
+            try { rmFile(plSession.stdoutFile); } catch(e) {} try { rmFile(plSession.stderrFile); } catch(e) {}
             db.del(rcloneDbi, '_oauth_session/' + plUser.username);
-
-            if (plToken) {
-                return _attachCookie({ status: 200, json: {ok: true, token: plToken} }, plUser);
-            } else {
-                return _attachCookie({ status: 200, json: {ok: false, error: 'Failed to parse token'} }, plUser);
-            }
+            return _attachCookie({ status: 200, json: {ok: true, token: plToken} }, plUser);
         }
 
         // Token not yet available
         return _attachCookie({ status: 200, json: {ok: false, pending: true} }, plUser);
+    }
+
+    // POST /dav/_oauth/cancel — kill rclone authorize and clean up session
+    if (method === 'POST' && fullPath === DAV_PREFIX + '/_oauth/cancel') {
+        var caUser = authenticate(req);
+        if (!caUser) return { status: 401, json: {ok: false, error: 'Not authenticated'} };
+
+        var caSession = db.get(rcloneDbi, '_oauth_session/' + caUser.username);
+        if (caSession) {
+            kill(parseInt(caSession.pid));
+            try { rmFile(caSession.stdoutFile); } catch(e) {}
+            try { rmFile(caSession.stderrFile); } catch(e) {}
+            db.del(rcloneDbi, '_oauth_session/' + caUser.username);
+        }
+        return _attachCookie({ status: 200, json: {ok: true} }, caUser);
     }
 
     // Public share access: GET /dav/_s/<token>[/subpath...]

@@ -50,6 +50,7 @@ var serverConf = {
 
     // required  for onlyoffice
     bindAll: true,
+    user: "myaccountname",  // nobody may make rclone fail.  Make an account and put that name here
 
     // dav endpoint
     appendMap: {
@@ -95,7 +96,7 @@ var serverConf = {
     user:        'nobody',
     */
 
-    // Below are the default settings:
+    // Below are the default settings for the rampart web server:
 
     /* ipAddr              String. The ipv4 address to bind   */
     //ipAddr:              '127.0.0.1',
@@ -487,9 +488,6 @@ if (!_oo.stat(ooCompose)) {
     }
 }
 
-setTimeout(function(){
-    rampart.utils.fprintf(process.scriptPath + `/info-${process.getpid()}.txt`,"%3J\n", rampart.utils.shell('whoami'));
-},1300);
 /* **************************************************** *
  *  process command line options and start/stop server  *
  * **************************************************** */

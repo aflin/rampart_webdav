@@ -402,15 +402,28 @@ const Toast = {
     const el = document.createElement('div');
     el.className = 'toast' + (type ? ' toast-' + type : '');
     el.textContent = message;
+    if (duration < 0) {
+      // Persistent — add close button
+      var closeBtn = document.createElement('span');
+      closeBtn.textContent = '\u00d7';
+      closeBtn.style.cssText = 'margin-left:12px;cursor:pointer;font-size:18px;font-weight:bold;float:right;line-height:1';
+      closeBtn.addEventListener('click', function() {
+        el.style.opacity = '0';
+        el.style.transition = 'opacity 0.3s';
+        setTimeout(function() { el.remove(); }, 300);
+      });
+      el.appendChild(closeBtn);
+    } else {
+      setTimeout(() => {
+        el.style.opacity = '0';
+        el.style.transition = 'opacity 0.3s';
+        setTimeout(() => el.remove(), 300);
+      }, duration);
+    }
     c.appendChild(el);
-    setTimeout(() => {
-      el.style.opacity = '0';
-      el.style.transition = 'opacity 0.3s';
-      setTimeout(() => el.remove(), 300);
-    }, duration);
   },
 
-  error(msg) { this.show(msg, 'error', 5000); },
+  error(msg) { this.show(msg, 'error', -1); },
   success(msg) { this.show(msg, 'success'); },
   warning(msg) { this.show(msg, 'warning', 5000); },
   info(msg) { this.show(msg); }
@@ -7836,9 +7849,26 @@ const App = {
 
   async _deleteItems(items) {
     if (items.length === 0) return;
-    const msg = items.length === 1
-      ? 'Delete "' + items[0].name + '"?'
-      : 'Delete ' + items.length + ' items?';
+    var msg;
+    if (items.length === 1) {
+      msg = 'Delete "' + items[0].name + '"?';
+      if (items[0].isDir) {
+        try {
+          var dirList = await DavClient.list(items[0].href, 1);
+          var children = dirList.filter(function(e) { return !e.isSelf; });
+          if (children.length > 0) {
+            var files = children.filter(function(e) { return !e.isDir; }).length;
+            var dirs = children.filter(function(e) { return e.isDir; }).length;
+            var parts = [];
+            if (files) parts.push(files + ' file' + (files !== 1 ? 's' : ''));
+            if (dirs) parts.push(dirs + ' folder' + (dirs !== 1 ? 's' : ''));
+            msg = 'Delete "' + items[0].name + '" containing ' + parts.join(' and ') + '?';
+          }
+        } catch(e) {}
+      }
+    } else {
+      msg = 'Delete ' + items.length + ' items?';
+    }
     const ok = await Dialog.confirm(msg, 'Delete', true);
     if (!ok) return;
 
@@ -9979,7 +10009,9 @@ const App = {
           '<td><span class="cloud-status ' + statusClass + '">' + statusText + '</span></td>' +
           '<td class="admin-actions">' +
             (!m.mounted ? '<button class="btn btn-sm cloud-remount-btn" data-name="' +
-              _escAttr(m.name) + '" data-provider="' + _escAttr(m.provider || '') + '">Mount</button>' : '') +
+              _escAttr(m.name) + '" data-provider="' + _escAttr(m.provider || '') + '">Mount</button>' :
+              '<button class="btn btn-sm cloud-unmount-btn" data-name="' +
+              _escAttr(m.name) + '">Unmount</button>') +
             '<button class="btn btn-sm btn-danger cloud-remove-btn" data-name="' +
               _escAttr(m.name) + '">Remove</button>' +
           '</td></tr>';
@@ -10053,6 +10085,29 @@ const App = {
         });
       });
 
+      container.querySelectorAll('.cloud-unmount-btn').forEach(btn => {
+        btn.addEventListener('click', async () => {
+          btn.disabled = true;
+          btn.textContent = 'Unmounting...';
+          try {
+            const resp = await fetch(self.davUrl + '_rclone/unmount', {
+              method: 'POST', credentials: 'same-origin',
+              headers: {'Content-Type': 'application/json'},
+              body: JSON.stringify({name: btn.dataset.name})
+            });
+            const d = await resp.json();
+            if (d.ok) {
+              Toast.success('Unmounted ' + btn.dataset.name);
+              var un = btn.dataset.name;
+              if (Auth.mountNames) Auth.mountNames = Auth.mountNames.filter(function(n) { return n !== un; });
+              FileList.reload();
+              Tree.init(); Tree.loadRoot();
+            } else Toast.error(d.error || 'Unmount failed');
+          } catch(e) { Toast.error('Connection error'); }
+          self._loadCloudMounts();
+        });
+      });
+
       container.querySelectorAll('.cloud-remove-btn').forEach(btn => {
         btn.addEventListener('click', async () => {
           if (!await Dialog.confirm('Remove cloud storage mount "' + btn.dataset.name + '"? This will disconnect the storage.', 'Remove', true)) return;
@@ -10095,10 +10150,10 @@ const App = {
     const wrap = document.createElement('div');
     wrap.className = 'settings-panel';
 
-    let html = '<div class="settings-section">' +
+    let html = '<form autocomplete="off" onsubmit="return false"><div class="settings-section">' +
       '<h3>Choose Provider</h3>' +
       '<div class="settings-field"><label>Mount name</label>' +
-        '<input type="text" id="cloud-mount-name" placeholder="mydrive" maxlength="32"></div>' +
+        '<input type="text" id="cloud-mount-name" name="cloud-mount-name-' + Date.now() + '" placeholder="mydrive" maxlength="32" autocomplete="new-password"></div>' +
       '<div class="settings-field"><label style="cursor:pointer">' +
         '<input type="checkbox" id="cloud-read-only" style="margin-right:6px;vertical-align:middle">' +
         'Mount read-only</label></div>' +
@@ -10202,13 +10257,16 @@ const App = {
       '<button class="btn btn-primary" id="cloud-create-btn">Create Mount</button>' +
       '<button class="btn" id="cloud-cancel-btn">Cancel</button>' +
       '</div>' +
-      '<span class="settings-msg" id="cloud-create-msg"></span>';
+      '<span class="settings-msg" id="cloud-create-msg"></span>' +
+      '</form>';
 
     wrap.innerHTML = html;
     Dialog.open('Add Cloud Storage', wrap, { wide: true });
 
     let oauthToken = null;
     let oauthPollTimer = null;
+    let oauthStarted = false;
+    let mountCreated = false;
     const self = this;
 
     // Provider selection toggles fields
@@ -10225,6 +10283,8 @@ const App = {
       if (oauthPollTimer) { clearInterval(oauthPollTimer); oauthPollTimer = null; }
       document.getElementById('cloud-oauth-relay').hidden = true;
       document.getElementById('cloud-oauth-start').disabled = false;
+      var createBtn = document.getElementById('cloud-create-btn');
+      createBtn.disabled = (tier === 'oauth');
       const oaMsg = document.getElementById('cloud-oauth-msg');
       if (oaMsg) { oaMsg.textContent = ''; oaMsg.className = 'settings-msg'; }
     };
@@ -10249,8 +10309,18 @@ const App = {
         });
         const data = await resp.json();
         if (data.ok) {
-          oaMsg.textContent = 'Callback relayed — waiting for token...';
-          oaMsg.className = 'settings-msg';
+          if (data.token) {
+            oauthToken = data.token;
+            if (oauthPollTimer) { clearInterval(oauthPollTimer); oauthPollTimer = null; }
+            if (popup && !popup.closed) popup.close();
+            oaMsg.textContent = 'Authorized!';
+            oaMsg.className = 'settings-msg success';
+            document.getElementById('cloud-oauth-relay').hidden = true;
+            document.getElementById('cloud-create-btn').disabled = false;
+          } else {
+            oaMsg.textContent = 'Callback relayed — waiting for token...';
+            oaMsg.className = 'settings-msg';
+          }
         } else {
           oaMsg.textContent = data.error || 'Relay failed';
           oaMsg.className = 'settings-msg error';
@@ -10267,6 +10337,7 @@ const App = {
       const oaMsg = document.getElementById('cloud-oauth-msg');
       const startBtn = document.getElementById('cloud-oauth-start');
       startBtn.disabled = true;
+      oauthStarted = true;
       oaMsg.textContent = 'Starting authorization...';
       oaMsg.className = 'settings-msg';
 
@@ -10281,6 +10352,7 @@ const App = {
           oaMsg.textContent = data.error || 'Failed to start authorization';
           oaMsg.className = 'settings-msg error';
           startBtn.disabled = false;
+          oauthStarted = false;
           return;
         }
 
@@ -10323,7 +10395,7 @@ const App = {
           if (!oauthToken && !relayed) {
             document.getElementById('cloud-oauth-relay').hidden = false;
           }
-        }, 10000);
+        }, 3000);
 
         // Poll server for token (rclone outputs it after callback is received)
         let pollCount = 0;
@@ -10351,6 +10423,7 @@ const App = {
               oaMsg.textContent = 'Authorized!';
               oaMsg.className = 'settings-msg success';
               document.getElementById('cloud-oauth-relay').hidden = true;
+              document.getElementById('cloud-create-btn').disabled = false;
             } else if (pollData.error && !pollData.pending) {
               oaMsg.textContent = pollData.error;
               oaMsg.className = 'settings-msg error';
@@ -10377,7 +10450,13 @@ const App = {
     });
 
     // Cancel
-    document.getElementById('cloud-cancel-btn').addEventListener('click', () => {
+    document.getElementById('cloud-cancel-btn').addEventListener('click', async () => {
+      if (oauthStarted && !mountCreated) {
+        var confirmed = await Dialog.confirm('Authorization is in progress. Cancelling will stop the process. Continue?', 'Cancel', true);
+        if (!confirmed) return;
+        // Kill the rclone authorize process
+        fetch(self.davUrl + '_oauth/cancel', { method: 'POST', credentials: 'same-origin' });
+      }
       if (oauthPollTimer) clearInterval(oauthPollTimer);
       Dialog.close();
       self.openSettings();
@@ -10480,12 +10559,13 @@ const App = {
         });
         const data = await resp.json();
         if (data.ok) {
+          mountCreated = true;
           if (oauthPollTimer) clearInterval(oauthPollTimer);
           const mountMsg = data.mounted
             ? 'Mount "' + name + '" created and active!'
             : 'Mount "' + name + '" created but failed to mount: ' + (data.mountError || 'unknown');
           if (data.mounted) Toast.success(mountMsg);
-          else Toast.info(mountMsg);
+          else Dialog.alert(mountMsg);
           // Update mount name lists for icons/zones
           if (data.mounted) {
             if (!Auth.mountNames) Auth.mountNames = [];

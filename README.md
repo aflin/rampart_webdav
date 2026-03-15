@@ -46,7 +46,9 @@ A self-hosted web file manager with a full-featured WebDAV backend, built on the
 
 ### Cloud Storage
 
-Requires [rclone](https://rclone.org/install/) installed on the server.
+- Requires [rclone](https://rclone.org/install/) installed on the server  (a recent version is required — v1.53+ tested).
+  - May require the `fuse3` package (`apt install fuse3` or equivalent)
+  - If rclone mounts are not visible to the web server, uncomment `user_allow_other` in `/etc/fuse.conf`
 
 - **Google Drive, Dropbox, OneDrive** — OAuth-based mounting
 - **Amazon S3, Backblaze B2, Wasabi, MinIO** — key-based mounting
