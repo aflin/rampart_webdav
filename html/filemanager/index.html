@@ -9,6 +9,14 @@
 </head>
 <body>
 
+  <!-- LOADING INDICATOR (hidden by JS when ready) -->
+  <div id="loading-screen" style="display:flex;align-items:center;justify-content:center;height:100vh;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;color:#666">
+    <div style="text-align:center">
+      <div style="font-size:24px;margin-bottom:8px">File Manager</div>
+      <div>Loading...</div>
+    </div>
+  </div>
+
   <!-- LOGIN SCREEN -->
   <div class="login-screen" id="login-screen" hidden>
     <form class="login-form" id="login-form">
@@ -53,6 +61,12 @@
       <div class="toolbar" id="toolbar">
         <button class="toolbar-btn sidebar-hamburger" id="sidebar-hamburger"
                 aria-label="Open sidebar"></button>
+        <button class="toolbar-btn nav-back" id="nav-back"
+                title="Back" disabled aria-label="Back"></button>
+        <button class="toolbar-btn nav-forward" id="nav-forward"
+                title="Forward" disabled aria-label="Forward"></button>
+        <button class="toolbar-btn nav-refresh" id="nav-refresh"
+                title="Refresh" aria-label="Refresh"></button>
         <nav class="breadcrumb" id="breadcrumb" aria-label="Breadcrumb">
         </nav>
         <div class="toolbar-actions">

@@ -459,7 +459,7 @@ function confirmOverwrite(fileName, remaining) {
   });
 }
 
-// Generate a non-conflicting filename by appending (1), (2), etc.
+// Generate a non-conflicting filename by appending -1, -2, etc.
 async function autoRename(targetUrl, fileName) {
   var dot = fileName.lastIndexOf('.');
   var base = dot > 0 ? fileName.substring(0, dot) : fileName;
@@ -467,7 +467,7 @@ async function autoRename(targetUrl, fileName) {
   var n = 1;
   var newName;
   while (true) {
-    newName = base + ' (' + n + ')' + ext;
+    newName = base + '-' + n + ext;
     try {
       var resp = await DavClient.send('HEAD', targetUrl + encodeURIComponent(newName));
       if (resp.status >= 400) break; // doesn't exist
@@ -2510,6 +2510,7 @@ const FileList = {
     if (pushHistory !== false) {
       const hash = '#' + url.replace(/^\/dav\//, '/');
       history.pushState(null, '', hash);
+      NavHistory.push(url);
     }
   },
 
@@ -3554,11 +3555,71 @@ const FileList = {
  * Section 8: Toolbar — Breadcrumb, view/sort, action buttons
  * ----------------------------------------------------------------------- */
 
+// Navigation history for back/forward buttons
+const NavHistory = {
+  _stack: [],
+  _index: -1,
+  _skipNext: false,
+
+  push(url) {
+    // Trim forward history when navigating to a new page
+    this._stack = this._stack.slice(0, this._index + 1);
+    this._stack.push(url);
+    this._index = this._stack.length - 1;
+    this._updateButtons();
+  },
+
+  canGoBack() { return this._index > 0; },
+  canGoForward() { return this._index < this._stack.length - 1; },
+
+  goBack() {
+    if (!this.canGoBack()) return;
+    this._skipNext = true;
+    this._index--;
+    this._updateButtons();
+    App.navigateTo(this._stack[this._index], false);
+  },
+
+  goForward() {
+    if (!this.canGoForward()) return;
+    this._skipNext = true;
+    this._index++;
+    this._updateButtons();
+    App.navigateTo(this._stack[this._index], false);
+  },
+
+  onPopState(url) {
+    // Find url in stack near current index
+    if (this._index > 0 && this._stack[this._index - 1] === url) {
+      this._index--;
+    } else if (this._index < this._stack.length - 1 && this._stack[this._index + 1] === url) {
+      this._index++;
+    }
+    this._updateButtons();
+  },
+
+  _updateButtons() {
+    var back = document.getElementById('nav-back');
+    var fwd = document.getElementById('nav-forward');
+    if (back) back.disabled = !this.canGoBack();
+    if (fwd) fwd.disabled = !this.canGoForward();
+  }
+};
+
 const Toolbar = {
   _initialized: false,
   init() {
     if (this._initialized) return;
     this._initialized = true;
+    // Navigation buttons
+    document.getElementById('nav-back').addEventListener('click', () => NavHistory.goBack());
+    document.getElementById('nav-forward').addEventListener('click', () => NavHistory.goForward());
+    document.getElementById('nav-refresh').addEventListener('click', () => {
+      FileList.reload();
+      Tree.init();
+      Tree.loadRoot();
+    });
+
     document.getElementById('dotfiles-toggle').addEventListener('click', () => FileList.toggleHidden());
     document.getElementById('view-toggle').addEventListener('click', () => FileList.toggleView());
     document.getElementById('upload-btn').addEventListener('click', () => Upload.pickFiles());
@@ -3782,9 +3843,11 @@ const Upload = {
       dropZone.hidden = true;
 
       // Check for URL drop (text/uri-list or text/plain with URL)
+      // Only accept http/https URLs, not file:// URIs
       var droppedUrl = '';
       if (e.dataTransfer.types.indexOf('text/uri-list') !== -1) {
-        droppedUrl = (e.dataTransfer.getData('text/uri-list') || '').trim().split('\n')[0].trim();
+        var uriList = (e.dataTransfer.getData('text/uri-list') || '').trim().split('\n')[0].trim();
+        if (/^https?:\/\//i.test(uriList)) droppedUrl = uriList;
       }
       if (!droppedUrl && e.dataTransfer.types.indexOf('text/plain') !== -1) {
         var txt = (e.dataTransfer.getData('text/plain') || '').trim();
@@ -3792,7 +3855,13 @@ const Upload = {
       }
       // Only treat as URL if there are no files being dropped
       if (droppedUrl && (!e.dataTransfer.files || e.dataTransfer.files.length === 0)) {
-        this._fetchUrl(droppedUrl, FileList.currentPath);
+        // Check drop plugins first
+        var dropPlugins = this._findDropPlugins(droppedUrl);
+        if (dropPlugins.length > 0) {
+          this._handlePluginDrop(droppedUrl, FileList.currentPath, dropPlugins, 0);
+        } else {
+          this._fetchUrl(droppedUrl, FileList.currentPath);
+        }
         return;
       }
 
@@ -4092,6 +4161,173 @@ const Upload = {
     });
   },
 
+  _findDropPlugins(url) {
+    var matches = [];
+    if (!this._dropPlugins) return matches;
+    for (var i = 0; i < this._dropPlugins.length; i++) {
+      var patterns = this._dropPlugins[i].patterns;
+      for (var j = 0; j < patterns.length; j++) {
+        if (patterns[j].test(url)) {
+          matches.push(this._dropPlugins[i].name);
+          break;
+        }
+      }
+    }
+    return matches;
+  },
+
+  async _handlePluginDrop(url, targetDir, pluginList, pluginIndex, choice) {
+    var pluginName = pluginList[pluginIndex];
+    Toast.show('Processing URL...');
+    try {
+      var resp = await fetch(App.davUrl + '_plugin/drop', {
+        method: 'POST', credentials: 'same-origin',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ url: url, dir: targetDir, plugin: pluginName, choice: choice || null })
+      });
+      var data = await resp.json();
+
+      // Plugin says it can't handle this URL — try next plugin
+      if (data.pass) {
+        if (pluginIndex + 1 < pluginList.length) {
+          this._handlePluginDrop(url, targetDir, pluginList, pluginIndex + 1);
+        } else {
+          // No more plugins — fall back to URL fetch
+          this._fetchUrl(url, targetDir);
+        }
+        return;
+      }
+
+      if (data.ok && data.prompt) {
+        var wrap = document.createElement('div');
+        wrap.style.cssText = 'display:flex;flex-direction:column;gap:8px;padding:8px';
+        var title = document.createElement('p');
+        title.textContent = data.title || 'Choose an option';
+        wrap.appendChild(title);
+        var self = this;
+        for (var i = 0; i < data.choices.length; i++) {
+          (function(ch) {
+            var btn = document.createElement('button');
+            btn.className = 'btn btn-sm';
+            btn.textContent = ch.label;
+            btn.addEventListener('click', function() {
+              Dialog.close();
+              self._handlePluginDrop(url, targetDir, pluginList, pluginIndex, ch.value);
+            });
+            wrap.appendChild(btn);
+          })(data.choices[i]);
+        }
+        Dialog.open('Plugin: ' + pluginName, wrap);
+        return;
+      }
+
+      if (data.ok && data.background) {
+        this._pollBackgroundJob(data.jobId, targetDir);
+        return;
+      }
+
+      if (data.ok && data.created) {
+        Toast.success('Created: ' + data.name);
+        await FileList.reload();
+        if (data.open) {
+          var createdHref = targetDir + encodeURIComponent(data.name);
+          var createdItem = { name: data.name, href: createdHref, isDir: false };
+          if (data.openPlugin) {
+            Viewers._openPlugin(createdItem, data.openPlugin);
+          } else {
+            Viewers.open(createdItem);
+          }
+        }
+      } else if (data.error) {
+        Toast.error(data.error);
+      }
+    } catch(e) {
+      Toast.error('Plugin drop failed: ' + (e.message || 'connection error'));
+    }
+  },
+
+  _pollBackgroundJob(jobId, targetDir) {
+    // Create a persistent progress toast
+    var c = Toast._getContainer();
+    var el = document.createElement('div');
+    el.className = 'toast toast-info';
+    el.style.minWidth = '250px';
+    el.innerHTML = '<div style="display:flex;justify-content:space-between;align-items:center">' +
+      '<span id="job-msg-' + jobId + '">Downloading...</span>' +
+      '<span id="job-size-' + jobId + '" style="font-size:12px;color:#888;margin-left:12px"></span>' +
+      '</div>';
+    c.appendChild(el);
+
+    var msgEl = document.getElementById('job-msg-' + jobId);
+    var sizeEl = document.getElementById('job-size-' + jobId);
+
+    function formatSize(bytes) {
+      if (bytes < 1024) return bytes + ' B';
+      if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+      return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+    }
+
+    var self = this;
+    var pollTimer = setInterval(async function() {
+      try {
+        var resp = await fetch(App.davUrl + '_plugin/job?id=' + encodeURIComponent(jobId), { credentials: 'same-origin' });
+        var data = await resp.json();
+        if (!data.ok || !data.job) {
+          clearInterval(pollTimer);
+          el.remove();
+          Toast.error('Job lost');
+          return;
+        }
+
+        var job = data.job;
+        sizeEl.textContent = formatSize(job.bytes || 0);
+
+        if (job.status === 'complete') {
+          clearInterval(pollTimer);
+          el.remove();
+
+          // Re-check directory for new files one final time
+          try {
+            var finalResp = await fetch(App.davUrl + '_plugin/job?id=' + encodeURIComponent(jobId), { credentials: 'same-origin' });
+            var finalData = await finalResp.json();
+            if (finalData.ok && finalData.job) job = finalData.job;
+          } catch(e) {}
+
+          if (job.files && job.files.length > 0) {
+            Toast.success('Downloaded: ' + job.files.join(', '));
+            await FileList.reload();
+            if (job.open) {
+              var bestFile = job.files[0];
+              var bestBytes = 0;
+              // Pick the largest file (likely the video)
+              for (var jfi = 0; jfi < job.files.length; jfi++) {
+                // files are just names; we don't have sizes here
+                // but video files are typically listed last
+                bestFile = job.files[jfi];
+              }
+              var createdHref = targetDir + encodeURIComponent(bestFile);
+              var createdItem = { name: bestFile, href: createdHref, isDir: false };
+              Viewers.open(createdItem);
+            }
+          } else {
+            Toast.error('Download failed: ' + (job.output || 'no files created').substring(0, 500));
+            await FileList.reload();
+          }
+        } else if (job.status === 'error') {
+          clearInterval(pollTimer);
+          el.remove();
+          Toast.error('Download failed: ' + (job.error || 'unknown'));
+        } else {
+          // Still running
+          msgEl.textContent = 'Downloading... ' +
+            (job.files && job.files.length ? job.files.length + ' file(s)' : '');
+        }
+      } catch(e) {
+        // Network error — keep polling
+      }
+    }, 2000);
+  },
+
   async _fetchUrl(url, targetDir) {
     if (!await this._checkWriteAccess(targetDir)) {
       Dialog.alert('You do not have write permission for this folder.');
@@ -4200,6 +4436,22 @@ const Viewers = {
   },
 
   async open(item) {
+    // Check plugins first (extension, then MIME type)
+    if (!item.isDir) {
+      var pluginName = null;
+      if (this._pluginExtMap) {
+        var ext = (item.name.match(/\.([^.]+)$/) || [])[1];
+        if (ext) pluginName = this._pluginExtMap[ext.toLowerCase()];
+      }
+      if (!pluginName && this._pluginMimeMap && item.mime) {
+        pluginName = this._pluginMimeMap[item.mime.toLowerCase()];
+      }
+      if (pluginName) {
+        this._openPlugin(item, pluginName);
+        return;
+      }
+    }
+
     const type = this.getType(item);
     if (!type) return;
 
@@ -5953,6 +6205,55 @@ const Viewers = {
     });
   },
 
+  _openPlugin(item, pluginName) {
+    var renderUrl = '/dav/_plugin/render?file=' + encodeURIComponent(item.href) +
+        '&plugin=' + encodeURIComponent(pluginName);
+    var dirty = false;
+    var winId;
+    var plugin = this._plugins ? this._plugins[pluginName] : null;
+
+    var iframe = document.createElement('iframe');
+    iframe.className = 'pdf-viewer';
+    iframe.src = renderUrl;
+    iframe.setAttribute('allowfullscreen', 'true');
+
+    // Inject custom statusbar icon if plugin provides one
+    var winType = 'plugin';
+    if (plugin && plugin.icon) {
+      winType = 'plugin-' + pluginName.replace(/[^a-zA-Z0-9]/g, '-').toLowerCase();
+      if (!document.getElementById('plugin-icon-' + winType)) {
+        var style = document.createElement('style');
+        style.id = 'plugin-icon-' + winType;
+        style.textContent = '.statusbar-win-btn[data-type="' + winType + '"]::after { ' +
+          '-webkit-mask-image: url("' + plugin.icon + '"); ' +
+          'mask-image: url("' + plugin.icon + '"); }';
+        document.head.appendChild(style);
+      }
+    }
+
+    function onMessage(e) {
+      if (!e.data || typeof e.data.type !== 'string') return;
+      if (e.data.type === 'oo-dirty') {
+        dirty = e.data.dirty;
+        var title = dirty ? '● ' + item.name : item.name;
+        WinManager.setTitle(winId, title);
+      }
+    }
+    window.addEventListener('message', onMessage);
+
+    winId = WinManager.open(item.name, iframe, {
+      type: winType, full: true, noPadding: true,
+      singleton: !!(plugin && plugin.singleton),
+      beforeClose: function() {
+        if (!dirty) return true;
+        return Dialog.confirm('You have unsaved changes. Close anyway?', 'Close', true);
+      },
+      onClose: function() {
+        window.removeEventListener('message', onMessage);
+      }
+    });
+  },
+
   _openPdf(item) {
     const iframe = document.createElement('iframe');
     iframe.className = 'pdf-viewer';
@@ -7263,6 +7564,25 @@ const App = {
       }
     } catch (e) {}
 
+    // Fetch plugins
+    try {
+      var pluginResp = await fetch(this.davUrl + '_plugins', { credentials: 'same-origin' });
+      var pluginData = await pluginResp.json();
+      if (pluginData.ok) {
+        Viewers._pluginExtMap = pluginData.extMap || {};
+        Viewers._pluginMimeMap = pluginData.mimeMap || {};
+        Viewers._plugins = {};
+        (pluginData.plugins || []).forEach(function(p) { Viewers._plugins[p.name] = p; });
+        // Store drop plugins for URL drop handling
+        Upload._dropPlugins = (pluginData.dropPlugins || []).map(function(dp) {
+          return {
+            name: dp.name,
+            patterns: (dp.patterns || []).map(function(p) { return new RegExp(p.source, p.flags); })
+          };
+        });
+      }
+    } catch (e) {}
+
     await this._ensureDefaults();
     await Tree.loadRoot();
 
@@ -7270,6 +7590,7 @@ const App = {
     var rawHash = location.hash.substring(1);
     var hashPath = rawHash ? (/^\/dav\//.test(rawHash) ? rawHash : '/dav' + rawHash) : '';
     const startPath = hashPath || Auth.getUserHomeUrl();
+    NavHistory.push(startPath);
     await FileList.navigate(startPath, false);
     location.hash = '#' + FileList.currentPath.replace(/^\/dav\//, '/');
 
@@ -7279,6 +7600,8 @@ const App = {
   },
 
   showLogin() {
+    var ls = document.getElementById('loading-screen');
+    if (ls) ls.remove();
     document.getElementById('login-screen').hidden = false;
     document.getElementById('app').hidden = true;
     document.getElementById('login-user').value = '';
@@ -7288,6 +7611,8 @@ const App = {
   },
 
   showApp() {
+    var ls = document.getElementById('loading-screen');
+    if (ls) ls.remove();
     document.getElementById('login-screen').hidden = true;
     document.getElementById('app').hidden = false;
     document.title = Auth.username + '@' + location.hostname + ' - File Manager';

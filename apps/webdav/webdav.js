@@ -1364,6 +1364,19 @@ function ensureDirExists(path) {
     }
 }
 
+// Auto-rename a file to avoid overwriting: file.ext → file-1.ext → file-2.ext
+function autoRenameFile(dir, name) {
+    if (!stat(dir + '/' + name)) return name;
+    var dot = name.lastIndexOf('.');
+    var base = dot > 0 ? name.substring(0, dot) : name;
+    var ext = dot > 0 ? name.substring(dot) : '';
+    for (var n = 1; n < 1000; n++) {
+        var candidate = base + '-' + n + ext;
+        if (!stat(dir + '/' + candidate)) return candidate;
+    }
+    return base + '-' + Date.now() + ext;
+}
+
 function getParentDir(path) {
     var idx = path.lastIndexOf('/');
     if (idx <= 0) return '/';
@@ -2684,7 +2697,75 @@ function attachSessionCookie(resp, davUser, req) {
 }
 
 /* ============================================================
- * Section 8b: ONLYOFFICE JWT Helpers
+ * Section 8b: Plugins
+ * ============================================================ */
+
+var PLUGINS = {};
+var PLUGIN_EXT_MAP = {};
+
+// Background job tracking for plugins (drop downloads etc.)
+// Jobs are stored in the thread clipboard as JSON under
+// 'plugin_job/<jobId>'.
+function pluginJobSet(jobId, data) {
+    rampart.thread.put('plugin_job/' + jobId,
+        JSON.stringify(data));
+}
+function pluginJobGet(jobId) {
+    var raw = rampart.thread.get('plugin_job/' + jobId);
+    if (!raw) return null;
+    try { return JSON.parse(raw); } catch(e) { return null; }
+}
+function pluginJobDel(jobId) {
+    rampart.thread.del('plugin_job/' + jobId);
+}
+var PLUGIN_MIME_MAP = {};
+var PLUGIN_DROP_LIST = [];  // plugins with drop handlers, checked in order
+(function loadPlugins() {
+    var pluginDir = process.scriptPath + '/apps/webdav/plugins';
+    if (!stat(pluginDir)) return;
+    var files;
+    try { files = readdir(pluginDir).sort(); } catch(e) { return; }
+    if (!files) return;
+    for (var i = 0; i < files.length; i++) {
+        if (!/\.js$/.test(files[i])) continue;
+        try {
+            var plugin = require(pluginDir + '/' + files[i]);
+            if (!plugin.name) continue;
+            // Needs at least a render or drop function
+            if (!plugin.render && !plugin.drop) continue;
+            PLUGINS[plugin.name] = plugin;
+            if (plugin.extensions) {
+                for (var j = 0; j < plugin.extensions.length; j++) {
+                    PLUGIN_EXT_MAP[plugin.extensions[j].toLowerCase()] = plugin.name;
+                }
+            }
+            if (plugin.mimeTypes) {
+                for (var k = 0; k < plugin.mimeTypes.length; k++) {
+                    PLUGIN_MIME_MAP[plugin.mimeTypes[k].toLowerCase()] = plugin.name;
+                }
+            }
+            if (plugin.drop && plugin.dropPattern) {
+                // Normalize dropPattern to always be an array of RegExp
+                if (!Array.isArray(plugin.dropPattern)) {
+                    plugin.dropPattern = [plugin.dropPattern];
+                }
+                plugin.dropPattern = plugin.dropPattern.filter(function(re) {
+                    if (re instanceof RegExp) return true;
+                    fprintf(stderr, "Plugin '%s': dropPattern contains non-RegExp, skipping\n", plugin.name);
+                    return false;
+                });
+                if (plugin.dropPattern.length > 0) {
+                    PLUGIN_DROP_LIST.push(plugin.name);
+                }
+            }
+        } catch(e) {
+            fprintf(stderr, "Plugin load error (%s): %s\n", files[i], e.message || e);
+        }
+    }
+})();
+
+/* ============================================================
+ * Section 8c: ONLYOFFICE JWT Helpers
  * ============================================================ */
 
 var OO_JWT_SECRET = global.OO_JWT_SECRET || '';
@@ -3225,6 +3306,266 @@ function main_dispatch(req) {
         }
 
         return { status: 400, json: {ok: false, error: 'Unknown action'} };
+    }
+
+    /* ============================================================
+     * Plugin Endpoints
+     * ============================================================ */
+
+    // GET /dav/_plugins — list registered plugins and their extensions
+    if (method === 'GET' && fullPath === DAV_PREFIX + '/_plugins') {
+        var plgList = [];
+        var plgNames = Object.keys(PLUGINS);
+        for (var pi = 0; pi < plgNames.length; pi++) {
+            var plg = PLUGINS[plgNames[pi]];
+            plgList.push({
+                name: plg.name,
+                extensions: plg.extensions || [],
+                mimeTypes: plg.mimeTypes || [],
+                mode: plg.mode || 'viewer',
+                icon: plg.icon || null,
+                singleton: !!plg.singleton
+            });
+        }
+        // Build drop list in sorted order (from PLUGIN_DROP_LIST)
+        var plgDropList = [];
+        for (var di = 0; di < PLUGIN_DROP_LIST.length; di++) {
+            var dplg = PLUGINS[PLUGIN_DROP_LIST[di]];
+            if (dplg && dplg.dropPattern) {
+                plgDropList.push({
+                    name: dplg.name,
+                    patterns: dplg.dropPattern.map(function(re) {
+                        return { source: re.source, flags: re.flags };
+                    })
+                });
+            }
+        }
+        return { status: 200, json: {ok: true, plugins: plgList, extMap: PLUGIN_EXT_MAP, mimeMap: PLUGIN_MIME_MAP, dropPlugins: plgDropList} };
+    }
+
+    // GET /dav/_plugin/render?file=<davPath>&plugin=<name> — render file with plugin
+    if (method === 'GET' && fullPath === DAV_PREFIX + '/_plugin/render') {
+        var prUser = authenticate(req);
+        if (!prUser) return { status: 401, headers: make401Headers(req), html: '<h1>401 Unauthorized</h1>' };
+
+        var prQuery = req.query || req.path.search || {};
+        var prFile = prQuery.file;
+        var prPluginName = prQuery.plugin;
+        if (!prFile || !prPluginName) return { status: 400, html: '<h1>Missing parameters</h1>' };
+        prFile = decodeURIComponent(prFile);
+
+        var prPlugin = PLUGINS[prPluginName];
+        if (!prPlugin) return { status: 404, html: '<h1>Plugin not found</h1>' };
+
+        var prDavRel = getDavRelPath(prFile);
+        var prFsPath = buildFsPath(prDavRel);
+        if (!prFsPath || !stat(prFsPath)) return { status: 404, html: '<h1>File not found</h1>' };
+
+        // Check read permission
+        var prMeta = ensureFileMeta(prDavRel, prFsPath);
+        if (!checkPermission(prMeta, prUser, 'r')) return { status: 403, html: '<h1>Permission denied</h1>' };
+
+        var prCanEdit = checkPermission(prMeta, prUser, 'w');
+        var prContent = bufferToString(readFile(prFsPath));
+        var prFileName = prDavRel.split('/').pop();
+
+        try {
+            var prHtml = prPlugin.render(prContent, prFileName, prCanEdit, prFile);
+            return { status: 200, html: prHtml };
+        } catch(e) {
+            fprintf(stderr, "Plugin render error (%s): %s\n", prPluginName, e.message || e);
+            return { status: 500, html: '<h1>Plugin error: ' + _htmlEsc(e.message || 'unknown') + '</h1>' };
+        }
+    }
+
+    // GET /dav/_plugin/job?id=<jobId> — check background job status
+    if (method === 'GET' && fullPath === DAV_PREFIX + '/_plugin/job') {
+        var pjUser = authenticate(req);
+        if (!pjUser) return { status: 401, json: {ok: false, error: 'Not authenticated'} };
+
+        var pjQuery = req.query || req.path.search || {};
+        var pjId = (pjQuery.id || '').trim();
+        if (!pjId) return { status: 400, json: {ok: false, error: 'Missing job id'} };
+
+        var pjJob = pluginJobGet(pjId);
+        if (!pjJob) return { status: 404, json: {ok: false, error: 'Job not found'} };
+
+        // Check output files (while running and on completion)
+        if (pjJob.dir) {
+            var pjBytes = 0;
+            var pjFiles = [];
+            try {
+                var pjEntries = readdir(pjJob.dir);
+                if (pjEntries) {
+                    for (var pji = 0; pji < pjEntries.length; pji++) {
+                        var pjSt = stat(pjJob.dir + '/' + pjEntries[pji]);
+                        if (pjSt && pjSt.isFile && pjSt.mtime.getTime() >= pjJob.startTime - 1000) {
+                            pjBytes += pjSt.size;
+                            pjFiles.push(pjEntries[pji]);
+                        }
+                    }
+                }
+            } catch(e) {}
+            pjJob.bytes = pjBytes;
+            pjJob.files = pjFiles;
+        }
+
+        return _attachCookie({ status: 200, json: {ok: true, job: pjJob} }, pjUser);
+    }
+
+    // POST /dav/_plugin/drop — handle URL drop via plugin
+    if (method === 'POST' && fullPath === DAV_PREFIX + '/_plugin/drop') {
+        var pdUser = authenticate(req);
+        if (!pdUser) return { status: 401, json: {ok: false, error: 'Not authenticated'} };
+
+        var pdBody;
+        try { pdBody = JSON.parse(bufferToString(req.body)); } catch(e) {
+            return { status: 400, json: {ok: false, error: 'Invalid JSON'} };
+        }
+
+        var pdUrl = (pdBody.url || '').trim();
+        var pdDavDir = (pdBody.dir || '').trim();
+        var pdPluginName = (pdBody.plugin || '').trim();
+        var pdChoice = pdBody.choice || null;
+
+        if (!pdUrl || !pdDavDir || !pdPluginName) {
+            return { status: 400, json: {ok: false, error: 'Missing url, dir, or plugin'} };
+        }
+
+        var pdPlugin = PLUGINS[pdPluginName];
+        if (!pdPlugin || !pdPlugin.drop) {
+            return { status: 404, json: {ok: false, error: 'Plugin not found or has no drop handler'} };
+        }
+
+        // Verify write permission on target directory
+        var pdDavRel = getDavRelPath(pdDavDir);
+        var pdFsDir = buildFsPath(pdDavRel);
+        if (!pdFsDir || !stat(pdFsDir)) {
+            return { status: 404, json: {ok: false, error: 'Directory not found'} };
+        }
+        var pdMeta = ensureFileMeta(pdDavRel, pdFsDir);
+        if (!checkPermission(pdMeta, pdUser, 'w')) {
+            return { status: 403, json: {ok: false, error: 'Permission denied'} };
+        }
+
+        try {
+            var pdResult = pdPlugin.drop(pdUrl, pdFsDir, pdDavRel, pdChoice);
+
+            // Plugin can't handle this URL — pass to next plugin
+            if (pdResult && pdResult.pass) {
+                return _attachCookie({ status: 200, json: {pass: true} }, pdUser);
+            }
+
+            // Plugin wants to prompt the user for a choice
+            if (pdResult && pdResult.prompt) {
+                return _attachCookie({ status: 200, json: {
+                    ok: true,
+                    prompt: true,
+                    title: pdResult.title || 'Choose an option',
+                    choices: pdResult.choices || []
+                }}, pdUser);
+            }
+
+            // Plugin wants to run in background
+            // Returns: { background: true, cmd: 'shell command',
+            //   dir: '/path', open: true/false }
+            if (pdResult && pdResult.background) {
+                var pdJobId = hexify(crypto.rand(8));
+                var pdStartTime = Date.now();
+                pluginJobSet(pdJobId, {
+                    status: 'running',
+                    plugin: pdPluginName,
+                    url: pdUrl,
+                    dir: pdFsDir,
+                    davDir: pdDavRel,
+                    startTime: pdStartTime,
+                    open: !!pdResult.open,
+                    bytes: 0,
+                    files: [],
+                    user: pdUser.username
+                });
+
+                // Run the command in a thread
+                var pdBgThr = new rampart.thread();
+                pdBgThr.exec(function(cfg) {
+                    var u = rampart.utils;
+                    var job;
+                    try {
+                        var res = u.shell(cfg.cmd,
+                            cfg.shellOpts);
+                        job = JSON.parse(
+                            rampart.thread.get(
+                                'plugin_job/' + cfg.jobId)
+                            || '{}');
+                        job.status = 'complete';
+                        job.output =
+                            ((res.stderr || '') +
+                             (res.stdout || ''))
+                            .trim().substring(0, 1000);
+                        rampart.thread.put(
+                            'plugin_job/' + cfg.jobId,
+                            JSON.stringify(job));
+                    } catch(e) {
+                        job = JSON.parse(
+                            rampart.thread.get(
+                                'plugin_job/' + cfg.jobId)
+                            || '{}');
+                        job.status = 'error';
+                        job.error = (e.message || 'unknown')
+                            .substring(0, 500);
+                        rampart.thread.put(
+                            'plugin_job/' + cfg.jobId,
+                            JSON.stringify(job));
+                    }
+                }, {
+                    cmd: pdResult.cmd,
+                    shellOpts: pdResult.shellOpts || {
+                        timeout: 600000
+                    },
+                    jobId: pdJobId
+                });
+
+                return _attachCookie({ status: 200, json: {
+                    ok: true,
+                    background: true,
+                    jobId: pdJobId
+                }}, pdUser);
+            }
+
+            // Check if plugin wants the file opened after creation
+            var pdOpen = !!pdResult.open;
+            // If the plugin has a render handler, tell the frontend to use it
+            var pdOpenPlugin = (pdOpen && pdPlugin.render && pdPlugin.extensions) ? pdPluginName : null;
+
+            // Plugin returned content to save
+            if (pdResult && pdResult.name && pdResult.content) {
+                var pdFileName = autoRenameFile(pdFsDir, pdResult.name);
+                var pdFilePath = pdFsDir + '/' + pdFileName;
+                var pdFd = fopen(pdFilePath, 'w');
+                fwrite(pdFd, pdResult.content);
+                fclose(pdFd);
+                createFileMeta(pdDavRel + '/' + pdFileName, pdUser.username, false);
+                var pdResp1 = { ok: true, created: true, name: pdFileName, open: pdOpen, openPlugin: pdOpenPlugin };
+                return _attachCookie({ status: 200, json: pdResp1 }, pdUser);
+            }
+
+            // Plugin created the file directly
+            if (pdResult && pdResult.name && pdResult.created) {
+                createFileMeta(pdDavRel + '/' + pdResult.name, pdUser.username, false);
+                var pdResp2 = { ok: true, created: true, name: pdResult.name, open: pdOpen, openPlugin: pdOpenPlugin };
+                return _attachCookie({ status: 200, json: pdResp2 }, pdUser);
+            }
+
+            // Plugin returned an error
+            if (pdResult && pdResult.error) {
+                return _attachCookie({ status: 200, json: {ok: false, error: pdResult.error} }, pdUser);
+            }
+
+            return _attachCookie({ status: 200, json: {ok: false, error: 'Plugin returned no result'} }, pdUser);
+        } catch(e) {
+            fprintf(stderr, "Plugin drop error (%s): %s\n", pdPluginName, e.message || e);
+            return { status: 500, json: {ok: false, error: 'Plugin error: ' + (e.message || 'unknown')} };
+        }
     }
 
     /* ============================================================
@@ -4571,12 +4912,6 @@ function main_dispatch(req) {
         }
 
         var crConf = getUserRcloneConf(crUser.username);
-        var _crLog = process.scriptPath + '/create-debug.log';
-        fprintf(_crLog, true, "--- %s ---\n", new Date().toISOString());
-        fprintf(_crLog, true, "conf: %s\n", crConf);
-        fprintf(_crLog, true, "conf stat before config create: %s\n", JSON.stringify(stat(crConf)));
-        fprintf(_crLog, true, "tier: %s, provider: %s, mountName: %s\n", crTier, crProviderType, crMountName);
-        fprintf(_crLog, true, "token present: %s\n", !!(crParams && crParams.token));
 
         var configCmd = (RCLONE_PATH || 'rclone') + ' config create' +
             ' --config ' + _shellEscape(crConf) +
@@ -4629,24 +4964,20 @@ function main_dispatch(req) {
             // with token= is unreliable across rclone versions
             var crTokenJson = JSON.stringify(crParams.token);
             var crConfContent = '[' + crMountName + ']\ntype = ' + crProviderType + '\ntoken = ' + crTokenJson + '\n';
-            fprintf(_crLog, true, "oauth: writing rclone.conf directly\n");
             var crFd = fopen(crConf, 'w');
             fwrite(crFd, crConfContent);
             fclose(crFd);
         } else {
-            fprintf(_crLog, true, "configCmd: %s\n", configCmd.substring(0, 200));
             try {
                 shell(configCmd, {timeout: 15000});
             } catch(e) {}
             // Verify the config was written
             var crConfStat = stat(crConf);
             if (!crConfStat || crConfStat.size === 0) {
-                fprintf(_crLog, true, "config create: conf file (%s) missing or empty\n", crConf);
                 return { status: 500, json: {ok: false, error: 'Config creation failed: ' + crConf + ' missing or empty'} };
             }
         }
 
-        fprintf(_crLog, true, "conf stat before mount: %s\n", JSON.stringify(stat(crConf)));
 
         var crRemotePath = crParams.remotePath || '';
         // For SFTP, pass credentials via CLI flags (not in rclone.conf)
@@ -4654,9 +4985,7 @@ function main_dispatch(req) {
         if (crTier === 'sftp') {
             crSftpEnv = buildSftpMountEnv(sftpCreds);
         }
-        fprintf(_crLog, true, "calling rcloneMountRemote\n");
         var crMountResult = rcloneMountRemote(crUser.username, crMountName, crMountName, crRemotePath, '', crSftpEnv, crRootMount);
-        fprintf(_crLog, true, "mount result: %s\n", JSON.stringify(crMountResult));
 
         var crDavPath = crRootMount
             ? '/' + crMountName + '/'
@@ -4927,7 +5256,6 @@ function main_dispatch(req) {
         // Start rclone authorize in a thread (keeps process alive)
         var oaConf = getUserRcloneConf(oaUser.username);
         var oaNoOpen = (RCLONE_VERSION && RCLONE_VERSION >= '1.53') ? ' --auth-no-open-browser' : '';
-        var _oaLog = process.scriptPath + '/oauth-debug.log';
         var _oaThr = new rampart.thread();
         var oaBgCmd = (RCLONE_PATH || 'rclone') + ' authorize ' + _shellEscape(oaProvider) +
             ' --config ' + _shellEscape(oaConf) +
@@ -4937,11 +5265,9 @@ function main_dispatch(req) {
         _oaThr.exec(function(cfg) {
             var u = rampart.utils;
             u.fprintf(cfg.log, true, "thread running: %s\n", cfg.cmd);
-            var res = u.shell(cfg.cmd, {timeout: 300000});
-            u.fprintf(cfg.log, true, "thread done: exit=%d\n", res.exitStatus);
+            u.shell(cfg.cmd, {timeout: 300000});
         }, {
-            cmd: oaBgCmd,
-            log: _oaLog
+            cmd: oaBgCmd
         });
         // Give rclone a moment to start its listener
         rampart.utils.sleep(1);
@@ -4957,19 +5283,6 @@ function main_dispatch(req) {
             var oaWaitRes = shell(oaWaitCmd, {timeout: 15000});
             oaAuthUrl = oaWaitRes.stdout.trim();
         } catch(e) {}
-
-        // Debug logging
-        fprintf(_oaLog, true, "--- %s ---\n", new Date().toISOString());
-        fprintf(_oaLog, true, "pid: %s\n", oaPid);
-        fprintf(_oaLog, true, "grepCmd: %s\n", oaWaitCmd);
-        fprintf(_oaLog, true, "authUrl: %s\n", oaAuthUrl);
-        if (oaAuthUrl) {
-            var _oaCurlCmd = 'curl -s -o /dev/null -w "%{redirect_url}" ' + _shellEscape(oaAuthUrl);
-            fprintf(_oaLog, true, "curlCmd: %s\n", _oaCurlCmd);
-        }
-        try { fprintf(_oaLog, true, "stderr: %s\n", bufferToString(readFile(oaStderr))); } catch(e) { fprintf(_oaLog, true, "stderr: MISSING\n"); }
-        try { fprintf(_oaLog, true, "stdout: %s\n", bufferToString(readFile(oaStdout))); } catch(e) { fprintf(_oaLog, true, "stdout: MISSING\n"); }
-        fprintf(_oaLog, true, "\n");
 
         if (!oaAuthUrl) {
             kill(parseInt(oaPid));
@@ -4987,13 +5300,9 @@ function main_dispatch(req) {
             var oaRedirCmd = '/usr/bin/curl -s -o /dev/null -w "%{redirect_url}" ' + _shellEscape(oaAuthUrl);
             var oaRedirRes = shell(oaRedirCmd, {timeout: 10000});
             oaProviderUrl = oaRedirRes.stdout.trim();
-            fprintf(_oaLog, true, "curl exit=%d stdout='%s' stderr='%s'\n", oaRedirRes.exitStatus, oaRedirRes.stdout, oaRedirRes.stderr);
-        } catch(e) {
-            fprintf(_oaLog, true, "curl exception: %s\n", e.message || e);
-        }
+        } catch(e) {}
 
         if (!oaProviderUrl) {
-            fprintf(_oaLog, true, "providerUrl empty, failing\n");
             try { rmFile(oaStdout); } catch(e) {} try { rmFile(oaStderr); } catch(e) {}
             return { status: 500, json: {ok: false, error: 'Failed to get OAuth provider URL from rclone'} };
         }
