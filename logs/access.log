@@ -1,0 +1,21 @@
+set connection timeout to 20 sec and 0 microseconds
+set script timeout to 20000 millisecs
+HTTP server - initializing with 32 threads
+mapping not found  to function   404                  ->    function ()
+mapping dir   path to proxy     /sdkjs-plugins/      ->    http://127.0.0.1:6659/sdkjs-plugins/
+mapping dir   path to proxy     /dictionaries/       ->    http://127.0.0.1:6659/dictionaries/
+mapping dir   path to proxy     /coauthoring/        ->    http://127.0.0.1:6659/coauthoring/
+mapping exact path to proxy     /healthcheck         ->    http://127.0.0.1:6659/healthcheck
+mapping dir   path to proxy     /web-apps/           ->    http://127.0.0.1:6659/web-apps/
+mapping dir   path to proxy     /9.3.1-0/            ->    http://127.0.0.1:6659/9.3.1-0/
+mapping dir   path to mod folder ws://wsapps/         ->    module path:/zfs/home/aaron/rampart_webdav/wsapps/
+mapping dir   path to proxy     /fonts/              ->    http://127.0.0.1:6659/fonts/
+mapping dir   path to proxy     /cache/              ->    http://127.0.0.1:6659/cache/
+mapping dir   path to proxy     /sdkjs/              ->    http://127.0.0.1:6659/sdkjs/
+mapping dir   path to mod folder /apps/               ->    module path:/zfs/home/aaron/rampart_webdav/apps/
+mapping dir   path to proxy     /doc/                ->    http://127.0.0.1:6659/doc/
+mapping dir   path to function   /dav/                ->    module:/zfs/home/aaron/rampart_webdav/apps/webdav/webdav.js
+mapping filesystem folder        /                    ->    /zfs/home/aaron/rampart_webdav/html/
+HTTP server - adding 1 proxy thread(s), total 33 threads
+binding to 0.0.0.0 port 8088
+binding to :: port 8088
