@@ -50,7 +50,6 @@ var serverConf = {
 
     // required  for onlyoffice
     bindAll: true,
-    user: "myaccountname",  // nobody may make rclone fail.  Make an account and put that name here
 
     // dav endpoint
     appendMap: {
@@ -67,8 +66,9 @@ var serverConf = {
     // as http on port 80.
     /*
     bindAll:  true,
-    port:     80,  // requires start as root
-    user:     'nobody',
+    port:     80,               // requires start as root
+    user:     'myaccountname',  // user to switch to after start
+                                // note: nobody may make rclone fail.
     */
 
     // as https using letsencrypt:
@@ -77,17 +77,17 @@ var serverConf = {
     /*
     secure:      true,
     letsencrypt: "example.com",
-    port:        443,  // requires start as root
-    user:        'nobody',
-    redir:       true, //necessary for letsencrypt certbot to verify
+    port:        443,              // requires start as root
+    user:        'myaccountname',  // user to switch to after start
+    redir:       true,             //necessary for letsencrypt certbot to verify
     */
     
     // as https with self signed certificate:
     /*
     secure:   true,
     selfSign: true,
-    port:     443,  // requires start as root
-    user:     'nobody',
+    port:     443,                 // requires start as root
+    user:        'myaccountname',  // user to switch to after start
     */
 
     // as https with your own certificates
@@ -95,8 +95,8 @@ var serverConf = {
     secure:      true,
     sslKeyFile:  '/path/to/my/server-key.pem',
     sslCertFile: '/path/to/my/server-cert.pem',
-    port:        443,  // requires start as root
-    user:        'nobody',
+    port:        443,              // requires start as root
+    user:        'myaccountname',  // user to switch to after start
     */
 
     // Below are the default settings for the rampart web server:
