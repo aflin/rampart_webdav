@@ -58,6 +58,9 @@ var serverConf = {
         // ONLYOFFICE proxy routes are added dynamically below
     },
 
+    // start the monitor process
+    monitor: true,
+
     // normally we bind to 127.0.0.1:8088, root not required.
     // you can uncomment and edit one the sections below to change that
 
