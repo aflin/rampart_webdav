@@ -3838,6 +3838,7 @@ function main_dispatch(req) {
                 userGroups: (settingsRecord && settingsRecord.groups) || [],
                 theme: (settingsRecord && settingsRecord.theme) || 'auto',
                 terminal: DEMO_MODE ? false : !!(settingsRecord && settingsRecord.terminal),
+                vnc: DEMO_MODE ? false : !!(settingsRecord && settingsRecord.vnc),
                 termTheme: (settingsRecord && settingsRecord.termTheme) || 'auto',
                 cmTheme: (settingsRecord && settingsRecord.cmTheme) || 'auto',
                 ooAutosave: settingsRecord && typeof settingsRecord.ooAutosave === 'boolean' ? settingsRecord.ooAutosave : true,
@@ -4090,7 +4091,8 @@ function main_dispatch(req) {
                     admin: !!au.admin,
                     created: au.created || null,
                     groups: au.groups || [],
-                    terminal: !!au.terminal
+                    terminal: !!au.terminal,
+                    vnc: !!au.vnc
                 });
             }
         }
@@ -4250,6 +4252,28 @@ function main_dispatch(req) {
         ttRecord.terminal = !ttRecord.terminal;
         db.put(userDbi, ttUsername, ttRecord);
         return { status: 200, json: {ok: true, terminal: ttRecord.terminal} };
+    }
+
+    // Admin: POST /dav/_admin/vnc — toggle VNC access for a user
+    if (method === 'POST' && fullPath === DAV_PREFIX + '/_admin/vnc') {
+        var adUser = authenticate(req);
+        if (!adUser) return { status: 401, json: {ok: false, error: 'Not authenticated'} };
+        if (!adUser.admin) return { status: 403, json: {ok: false, error: 'Admin required'} };
+        var vnBody;
+        try { vnBody = JSON.parse(bufferToString(req.body)); } catch(e) {
+            return { status: 400, json: {ok: false, error: 'Invalid JSON'} };
+        }
+        var vnUsername = (vnBody.username || '').trim();
+        if (!vnUsername) {
+            return { status: 400, json: {ok: false, error: 'Username required'} };
+        }
+        var vnRecord = db.get(userDbi, vnUsername);
+        if (!vnRecord) {
+            return { status: 404, json: {ok: false, error: 'User not found'} };
+        }
+        vnRecord.vnc = !vnRecord.vnc;
+        db.put(userDbi, vnUsername, vnRecord);
+        return { status: 200, json: {ok: true, vnc: vnRecord.vnc} };
     }
 
     // Admin: GET /dav/_admin/groups — list all groups with members

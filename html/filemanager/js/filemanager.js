@@ -3627,6 +3627,7 @@ const Toolbar = {
     document.getElementById('newfile-btn').addEventListener('click', () => App.newFile());
     document.getElementById('empty-trash-btn').addEventListener('click', () => App._emptyTrash());
     document.getElementById('terminal-btn').addEventListener('click', () => App.openTerminal());
+    document.getElementById('vnc-btn').addEventListener('click', () => App.openVnc());
     document.getElementById('settings-btn').addEventListener('click', () => App.openSettings());
     document.getElementById('logout-btn').addEventListener('click', () => Auth.logout());
 
@@ -7536,6 +7537,7 @@ const App = {
         Auth.groups = settingsData.userGroups || [];
         Auth.admin = !!settingsData.admin;
         Auth.terminal = !!settingsData.terminal;
+        Auth.vnc = !!settingsData.vnc;
         Auth.termTheme = settingsData.termTheme || 'auto';
         Auth.cmTheme = settingsData.cmTheme || 'auto';
         Auth.ooAutosave = typeof settingsData.ooAutosave === 'boolean' ? settingsData.ooAutosave : true;
@@ -7547,6 +7549,7 @@ const App = {
         Auth.theme = settingsData.theme || 'auto';
         this.applyTheme(Auth.theme);
         document.getElementById('terminal-btn').hidden = !settingsData.terminal;
+        document.getElementById('vnc-btn').hidden = !settingsData.vnc;
       }
     } catch (e) {}
 
@@ -7680,6 +7683,138 @@ const App = {
     path = path.replace(/\/?$/, '/');
     await FileList.navigate(path, pushHistory);
     Tree.revealPath(path);
+  },
+
+  // VNC Remote Desktop
+  async openVnc() {
+    var wrap = document.createElement('div');
+    wrap.style.cssText = 'display:flex;flex-direction:column;gap:8px';
+
+    var hostLabel = document.createElement('label');
+    hostLabel.textContent = 'VNC Host';
+    var hostInput = document.createElement('input');
+    hostInput.type = 'text';
+    hostInput.className = 'dialog-input';
+    hostInput.value = 'localhost';
+    hostInput.placeholder = 'hostname or IP';
+
+    var portLabel = document.createElement('label');
+    portLabel.textContent = 'VNC Port';
+    var portInput = document.createElement('input');
+    portInput.type = 'text';
+    portInput.className = 'dialog-input';
+    portInput.value = '5900';
+    portInput.placeholder = '5900';
+
+    var userLabel = document.createElement('label');
+    userLabel.textContent = 'Username (for macOS, leave blank for standard VNC)';
+    var userInput = document.createElement('input');
+    userInput.type = 'text';
+    userInput.className = 'dialog-input';
+    userInput.placeholder = 'username';
+    userInput.autocomplete = 'off';
+
+    var passLabel = document.createElement('label');
+    passLabel.textContent = 'Password';
+    var passInput = document.createElement('input');
+    passInput.type = 'password';
+    passInput.className = 'dialog-input';
+    passInput.placeholder = 'VNC password';
+
+    wrap.appendChild(hostLabel);
+    wrap.appendChild(hostInput);
+    wrap.appendChild(portLabel);
+    wrap.appendChild(portInput);
+    wrap.appendChild(userLabel);
+    wrap.appendChild(userInput);
+    wrap.appendChild(passLabel);
+    wrap.appendChild(passInput);
+
+    var self = this;
+    var confirmed = await new Promise(function(resolve) {
+      var connectBtn = document.createElement('button');
+      connectBtn.className = 'btn btn-primary btn-sm';
+      connectBtn.textContent = 'Connect';
+      connectBtn.style.marginTop = '8px';
+      connectBtn.addEventListener('click', function() {
+        resolve(true);
+        Dialog.close();
+      });
+      wrap.appendChild(connectBtn);
+      Dialog.open('VNC Remote Desktop', wrap);
+    });
+
+    if (!confirmed) return;
+
+    var host = hostInput.value.trim() || 'localhost';
+    var port = portInput.value.trim() || '5900';
+    var username = userInput.value.trim();
+    var password = passInput.value;
+
+    this._openVncSession(host, port, password, username);
+  },
+
+  _openVncSession(host, port, password, username) {
+    var containerId = 'vnc-container-' + Date.now();
+    var container = document.createElement('div');
+    container.id = containerId;
+    container.style.cssText = 'width:100%;height:100%;background:#000;overflow:hidden';
+
+    var winTitle = 'VNC — ' + host + ':' + port;
+
+    // Store RFB reference on window for cleanup
+    var vncKey = 'vnc_rfb_' + containerId;
+
+    var winId = WinManager.open(winTitle, container, {
+      type: 'vnc', full: true, noPadding: true,
+      onClose: function() {
+        if (window[vncKey]) {
+          try { window[vncKey].disconnect(); } catch(e) {}
+          window[vncKey] = null;
+        }
+      }
+    });
+
+    // Load noVNC and connect directly
+    var scheme = location.protocol === 'https:' ? 'wss' : 'ws';
+    var wsUrl = scheme + '://' + location.host +
+      '/wsapps/vnc/vnc.js?host=' + encodeURIComponent(host) +
+      '&port=' + encodeURIComponent(port);
+    var escapedPass = password.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+    var escapedUser = (username || '').replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+
+    var script = document.createElement('script');
+    script.type = 'module';
+    script.textContent =
+      "import RFB from '/filemanager/js/noVNC/core/rfb.js';\n" +
+      "var container = document.getElementById('" + containerId + "');\n" +
+      "try {\n" +
+      "  var creds = { password: '" + escapedPass + "' };\n" +
+      "  if ('" + escapedUser + "') creds.username = '" + escapedUser + "';\n" +
+      "  var rfb = new RFB(container, '" + wsUrl + "',\n" +
+      "    { credentials: creds });\n" +
+      "  rfb.scaleViewport = true;\n" +
+      "  rfb.resizeSession = true;\n" +
+      "  rfb.showDotCursor = true;\n" +
+      "  rfb.addEventListener('connect', function() {\n" +
+      "    container.style.background = 'none';\n" +
+      "  });\n" +
+      "  rfb.addEventListener('disconnect', function(e) {\n" +
+      "    var msg = (e.detail && e.detail.reason) || 'VNC connection lost';\n" +
+      "    if (!e.detail.clean) {\n" +
+      "      container.innerHTML = '<div style=\"color:#f88;padding:20px;font-family:sans-serif\">' + msg + '</div>';\n" +
+      "    }\n" +
+      "  });\n" +
+      "  rfb.addEventListener('credentialsrequired', function() {\n" +
+      "    var pw = prompt('VNC password required:');\n" +
+      "    if (pw) rfb.sendCredentials({ password: pw });\n" +
+      "    else rfb.disconnect();\n" +
+      "  });\n" +
+      "  window['" + vncKey + "'] = rfb;\n" +
+      "} catch(e) {\n" +
+      "  container.innerHTML = '<div style=\"color:#f88;padding:20px;font-family:sans-serif\">Failed to connect: ' + e.message + '</div>';\n" +
+      "}\n";
+    document.body.appendChild(script);
   },
 
   // Context menu
@@ -10051,9 +10186,12 @@ const App = {
               ' title="' + (isSelf ? 'Cannot delete yourself' : u.admin ? 'Demote from admin first' : 'Delete user (files preserved)') + '">Delete</button>' +
             '<button class="btn btn-sm admin-btn-term' + (u.terminal ? ' active' : '') + '" data-user="' + _escAttr(u.username) + '"' +
               ' title="' + (u.terminal ? 'Disable terminal' : 'Enable terminal') + '">' + (u.terminal ? 'Term \u2713' : 'Term') + '</button>' +
+            '<button class="btn btn-sm admin-btn-vnc' + (u.vnc ? ' active' : '') + '" data-user="' + _escAttr(u.username) + '"' +
+              ' title="' + (u.vnc ? 'Disable VNC' : 'Enable VNC') + '">' + (u.vnc ? 'VNC* \u2713' : 'VNC*') + '</button>' +
           '</td></tr>';
       });
       html += '</tbody></table>';
+      html += '<p style="font-size:11px;color:var(--color-fg-secondary);margin-top:6px">* VNC is experimental. Connection to some VNC servers may fail due to encoding incompatibilities.</p>';
       container.innerHTML = html;
 
       // Wire up action buttons
@@ -10069,6 +10207,9 @@ const App = {
       });
       container.querySelectorAll('.admin-btn-term').forEach(function(btn) {
         btn.addEventListener('click', function() { self._adminToggleTerminal(btn.dataset.user); });
+      });
+      container.querySelectorAll('.admin-btn-vnc').forEach(function(btn) {
+        btn.addEventListener('click', function() { self._adminToggleVnc(btn.dataset.user); });
       });
     } catch (e) {
       container.innerHTML = '<p style="color:var(--color-danger)">Failed to load users</p>';
@@ -10255,6 +10396,21 @@ const App = {
       const data = await resp.json();
       if (data.ok) {
         Toast.show('Terminal ' + (data.terminal ? 'enabled' : 'disabled') + ' for ' + username);
+        this._loadAdminUserList();
+      } else { Toast.error(data.error || 'Failed'); }
+    } catch (e) { Toast.error('Connection error'); }
+  },
+
+  async _adminToggleVnc(username) {
+    try {
+      const resp = await fetch(this.davUrl + '_admin/vnc', {
+        method: 'POST', credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: username })
+      });
+      const data = await resp.json();
+      if (data.ok) {
+        Toast.show('VNC ' + (data.vnc ? 'enabled' : 'disabled') + ' for ' + username);
         this._loadAdminUserList();
       } else { Toast.error(data.error || 'Failed'); }
     } catch (e) { Toast.error('Connection error'); }

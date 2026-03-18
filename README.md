@@ -9,6 +9,7 @@ A self-hosted web file manager with a full-featured WebDAV backend, built on the
 - **Detail and grid views** with sortable columns (name, size, type, date, owner, permissions)
 - **Thumbnail generation** for images and videos (requires ffmpeg for video thumbnails)
 - **Drag-and-drop** file upload from desktop and internal move/copy between folders
+- **URL drop** — drag a URL onto the file panel to save web pages or download videos (via plugins)
 - **Clipboard paste** for quick file uploads
 - **Chunked uploads** for large files with progress indicators
 - **File previews and viewers:**
@@ -19,6 +20,7 @@ A self-hosted web file manager with a full-featured WebDAV backend, built on the
   - EPUB — e-book reader with table of contents
   - Code/text — CodeMirror editor with syntax highlighting and configurable themes
   - HTML — WYSIWYG editor (Jodit) with source mode toggle
+  - CSV/TSV — interactive table editor with sorting, cell editing, and save
   - Office documents — ONLYOFFICE integration for spreadsheets, documents, and presentations (optional, see below)
 - **Image editor** — Filerobot for cropping, filters, annotations, and export
 - **File information panel** with metadata, permissions, ownership, and share link management
@@ -26,6 +28,7 @@ A self-hosted web file manager with a full-featured WebDAV backend, built on the
 - **Context menu** with rename, copy, move, delete, download, zip, and permissions
 - **Multi-select** with bulk operations
 - **Keyboard navigation** and shortcuts
+- **Back/Forward/Refresh** navigation buttons
 - **Search** within the current directory
 - **Recycle bin** (trash) per user
 
@@ -35,6 +38,23 @@ A self-hosted web file manager with a full-featured WebDAV backend, built on the
 - **SSH client** — connect to remote hosts directly from the browser
 - Configurable color themes (dark, light, custom JSON)
 - Enabled per-user by admin
+
+### VNC Remote Desktop (Experimental)
+
+- **Browser-based VNC client** via noVNC with WebSocket-to-TCP bridge
+- Connect to any VNC server (TigerVNC, x11vnc, QEMU, macOS Screen Sharing)
+- Username/password authentication (supports Apple Remote Desktop)
+- Scaling and resize support
+- Enabled per-user by admin
+- Note: Some VNC servers may use encodings that are not fully supported
+
+### Plugin System
+
+- **File viewer/editor plugins** — open files with custom renderers
+- **URL drop handler plugins** — process dropped URLs (web clipper, video downloader)
+- Background job support for long-running downloads with progress display
+- Plugins loaded automatically from `apps/webdav/plugins/`
+- See [PLUGINS.md](apps/webdav/plugins/PLUGINS.md) for plugin development docs
 
 ### User Management
 
@@ -46,7 +66,7 @@ A self-hosted web file manager with a full-featured WebDAV backend, built on the
 
 ### Cloud Storage
 
-- Requires [rclone](https://rclone.org/install/) installed on the server  (a recent version is required — v1.53+ tested).
+- Requires [rclone](https://rclone.org/install/) installed on the server (a recent version is required — v1.53+ tested).
   - May require the `fuse3` package (`apt install fuse3` or equivalent)
   - If rclone mounts are not visible to the web server, uncomment `user_allow_other` in `/etc/fuse.conf`
 
@@ -79,14 +99,17 @@ Built-in demo mode for public showcases:
 - Automatic cleanup of user files after a configurable interval
 - Upload size and storage quota limits
 - Password change, session management, cloud storage, and admin features disabled
-- Terminal access disabled
+- Terminal and VNC access disabled
 
 ## Requirements
 
 - [Rampart](https://github.com/aflin/rampart) v0.6.2 or later
 - Optional: [ffmpeg](https://ffmpeg.org/) for video thumbnails
-- Optional: [rclone](https://rclone.org/) for cloud storage mounting
+- Optional: [rclone](https://rclone.org/) for cloud storage mounting (v1.53+ recommended)
+  - Requires `fuse3` package (`apt install fuse3` or equivalent)
+  - If rclone mounts are not visible to the web server, uncomment `user_allow_other` in `/etc/fuse.conf`
 - Optional: [Docker](https://www.docker.com/) for ONLYOFFICE document editing
+- Optional: [yt-dlp](https://github.com/yt-dlp/yt-dlp) for video download plugin
 
 ## Quick Start
 
@@ -127,18 +150,17 @@ Built-in demo mode for public showcases:
    Enabling the secure server options in `web_server_conf.js` is highly recommended,
    especially for mounting it on your filesystem over the internet.
 
-   To mount it with davfs2 or in the MacOs finder, use:
+   To mount it with davfs2 or in the macOS Finder, use:
    https://yourserver.tld/dav/username and provide name and password.
 
-
-7. **Manage the server:**
+6. **Manage the server:**
    ```bash
    rampart web_server_conf.js stop       # stop the server
    rampart web_server_conf.js restart    # restart the server
    rampart web_server_conf.js status     # check if running
    ```
 
-8. **Command-line user administration** (can be used while the server is running):
+7. **Command-line user administration** (can be used while the server is running):
    ```bash
    rampart apps/webdav/webdav.js add <username> <password>    # create a user
    rampart apps/webdav/webdav.js del <username>               # delete a user
@@ -158,15 +180,12 @@ ONLYOFFICE enables in-browser editing of Office documents (DOCX, XLSX, PPTX, ODS
 2. **Run the setup script:**
    ```bash
    cd onlyoffice
-   ./setup.sh
+   sudo ./setup.sh
    ```
 
    The script will:
    - Pull the ONLYOFFICE Docker image (~1 GB download on first run)
    - Start the container and wait for it to become healthy (2-5 minutes)
-   - Extract the generated configuration
-   - Optionally configure an external URL (required when Rampart is behind a reverse proxy like nginx)
-   - Set up volume mounts for persistent configuration
 
 3. **Restart the Rampart server** so it detects ONLYOFFICE:
    ```bash
@@ -189,6 +208,7 @@ The ONLYOFFICE container needs to connect back to Rampart to fetch and save docu
 - The ONLYOFFICE version prefix is extracted from the running container, so upgrades are automatic
 - If the Docker image is not installed, the server starts normally with document editing disabled
 - If the container is stopped, Rampart will start it automatically on server startup
+- Callback URLs always use `host.docker.internal` so ONLYOFFICE can reach Rampart regardless of how the browser connects (direct, proxy, tunnel)
 
 ### Reverse Proxy Setup
 
@@ -203,8 +223,6 @@ proxy_set_header Upgrade $http_upgrade;
 proxy_set_header Connection "Upgrade";
 ```
 
-During `./setup.sh`, enter the external URL (e.g. `https://example.com`) when prompted. This sets `storage.externalHost` inside the ONLYOFFICE container so cache file URLs use the correct public address.
-
 ### User Settings
 
 Each user can toggle ONLYOFFICE autosave in Settings > Document Editor. When autosave is off, documents are saved only on Ctrl+S or when the editor save button is clicked.
@@ -213,15 +231,20 @@ Each user can toggle ONLYOFFICE autosave in Settings > Document Editor. When aut
 
 ```
 web_server/
-  web_server_conf.js    — Server configuration
-  html/                 — Frontend (HTML, CSS, JavaScript)
-  apps/webdav/          — WebDAV server module
-  data/                 — User data, database, thumbnails (created at runtime)
-  onlyoffice/           — ONLYOFFICE Docker configuration
-    docker-compose.yml  — Container definition
-    setup.sh            — Setup script
+  web_server_conf.js       — Server configuration
+  html/filemanager/        — Frontend (HTML, CSS, JavaScript)
+  apps/webdav/             — WebDAV server module
+  apps/webdav/plugins/     — File viewer and URL drop plugins
+  wsapps/terminal/         — Terminal WebSocket bridge
+  wsapps/vnc/              — VNC WebSocket-to-TCP bridge
+  data/                    — User data, database, thumbnails (created at runtime)
+  onlyoffice/              — ONLYOFFICE Docker configuration
+    docker-compose.yml     — Container definition
+    setup.sh               — Setup script
 ```
 
 ## License
 
 MIT
+
+noVNC client library is licensed under MPL 2.0 (see `html/filemanager/js/noVNC/LICENSE.txt`).
