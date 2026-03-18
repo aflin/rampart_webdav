@@ -7765,8 +7765,154 @@ const App = {
     // Store RFB reference on window for cleanup
     var vncKey = 'vnc_rfb_' + containerId;
 
+    // Visual flash feedback for header buttons
+    function flashBtn(btn) {
+      btn.style.opacity = '0.4';
+      setTimeout(function() { btn.style.opacity = ''; }, 150);
+    }
+
+    // Type text into remote via sendKey (avoids clipboard issues)
+    function vncTypeText(rfb, text) {
+      for (var i = 0; i < text.length; i++) {
+        var ch = text.charCodeAt(i);
+        // X11 keysym: ASCII/Latin-1 chars map directly, Unicode uses 0x01000000 + codepoint
+        var keysym = ch > 0xFF ? 0x01000000 | ch : ch;
+        // newline → Return key
+        if (ch === 10) keysym = 0xFF0D;
+        // tab → Tab key
+        else if (ch === 9) keysym = 0xFF09;
+        rfb.sendKey(keysym);
+      }
+    }
+
+    // Ctrl+Alt+Del button
+    var cadBtn = document.createElement('button');
+    cadBtn.className = 'modal-header-btn';
+    cadBtn.title = 'Send Ctrl+Alt+Del';
+    cadBtn.style.cssText = 'font-size:11px;min-width:auto;padding:2px 6px';
+    cadBtn.innerHTML = 'C+A+D';
+    cadBtn.addEventListener('click', function() {
+      var rfb = window[vncKey];
+      if (rfb) {
+        flashBtn(cadBtn);
+        rfb.sendCtrlAltDel();
+      }
+    });
+
+    // Clipboard paste button (local → remote) — types text via sendKey
+    var pasteBtn = document.createElement('button');
+    pasteBtn.className = 'modal-header-btn';
+    pasteBtn.title = 'Type local clipboard text into remote';
+    pasteBtn.style.cssText = 'font-size:11px;min-width:auto;padding:2px 6px';
+    pasteBtn.textContent = 'Paste';
+    pasteBtn.addEventListener('click', async function() {
+      var rfb = window[vncKey];
+      if (!rfb) return;
+      flashBtn(pasteBtn);
+      var text;
+      try {
+        text = await navigator.clipboard.readText();
+      } catch(e) {
+        text = prompt('Text to type into remote:');
+      }
+      if (text) {
+        vncTypeText(rfb, text);
+        Toast.show('Typed ' + text.length + ' characters into remote');
+      } else {
+        Toast.show('Clipboard is empty');
+      }
+    });
+
+    // Clipboard copy button (remote → local)
+    var clipTextKey = 'vnc_clip_' + containerId;
+    window[clipTextKey] = '';
+    var copyBtn = document.createElement('button');
+    copyBtn.className = 'modal-header-btn';
+    copyBtn.title = 'Copy remote clipboard to local';
+    copyBtn.style.cssText = 'font-size:11px;min-width:auto;padding:2px 6px';
+    copyBtn.textContent = 'Copy';
+    copyBtn.addEventListener('click', async function() {
+      flashBtn(copyBtn);
+      var text = window[clipTextKey];
+      if (!text) {
+        Toast.show('No remote clipboard received. Note: macOS Screen Sharing does not share its clipboard over VNC. This works with x11vnc and TigerVNC on Linux.');
+        return;
+      }
+      try {
+        await navigator.clipboard.writeText(text);
+        Toast.show('Copied to local clipboard (' + text.length + ' chars)');
+      } catch(e) {
+        prompt('Remote clipboard text (select and copy):', text);
+      }
+    });
+
+    // Zoom state
+    var vncZoom = { level: 0, fit: true }; // level=0 means fit-to-window
+    var zoomKey = 'vnc_zoom_' + containerId;
+    window[zoomKey] = vncZoom;
+
+    function applyVncZoom() {
+      var rfb = window[vncKey];
+      if (!rfb) return;
+      var canvas = container.querySelector('canvas');
+      if (!canvas) return;
+      if (vncZoom.fit) {
+        rfb.scaleViewport = true;
+        canvas.style.transform = '';
+        canvas.style.transformOrigin = '';
+        container.style.overflow = 'hidden';
+        zoomLabel.textContent = 'Fit';
+      } else {
+        rfb.scaleViewport = false;
+        var scale = Math.pow(1.25, vncZoom.level);
+        canvas.style.transform = 'scale(' + scale + ')';
+        canvas.style.transformOrigin = '0 0';
+        container.style.overflow = 'auto';
+        zoomLabel.textContent = Math.round(scale * 100) + '%';
+      }
+    }
+
+    // Zoom label
+    var zoomLabel = document.createElement('span');
+    zoomLabel.style.cssText = 'font-size:11px;opacity:0.7;margin:0 2px;min-width:32px;text-align:center';
+    zoomLabel.textContent = 'Fit';
+
+    // Zoom out button
+    var zoomOutBtn = document.createElement('button');
+    zoomOutBtn.className = 'modal-header-btn';
+    zoomOutBtn.title = 'Zoom out';
+    zoomOutBtn.innerHTML = '<svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M7 1a6 6 0 104.45 10.04l3.26 3.25 1.06-1.06-3.25-3.26A6 6 0 007 1zm0 1.5a4.5 4.5 0 110 9 4.5 4.5 0 010-9zM4.5 6.25v1.5h5v-1.5h-5z"/></svg>';
+    zoomOutBtn.addEventListener('click', function() {
+      vncZoom.fit = false;
+      vncZoom.level = Math.max(vncZoom.level - 1, -4);
+      applyVncZoom();
+    });
+
+    // Zoom in button
+    var zoomInBtn = document.createElement('button');
+    zoomInBtn.className = 'modal-header-btn';
+    zoomInBtn.title = 'Zoom in';
+    zoomInBtn.innerHTML = '<svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M7 1a6 6 0 104.45 10.04l3.26 3.25 1.06-1.06-3.25-3.26A6 6 0 007 1zm0 1.5a4.5 4.5 0 110 9 4.5 4.5 0 010-9zM6.25 4.5v2h-2v1h2v2h1.5v-2h2v-1h-2v-2h-1.5z"/></svg>';
+    zoomInBtn.addEventListener('click', function() {
+      vncZoom.fit = false;
+      vncZoom.level = Math.min(vncZoom.level + 1, 6);
+      applyVncZoom();
+    });
+
+    // Fit-to-window button
+    var fitBtn = document.createElement('button');
+    fitBtn.className = 'modal-header-btn';
+    fitBtn.title = 'Fit to window';
+    fitBtn.innerHTML = '<svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M2 2v5l1.8-1.8L6.5 8 8 6.5 5.2 3.8 7 2H2zm12 12v-5l-1.8 1.8L9.5 8 8 9.5l2.8 2.7L9 14h5z"/></svg>';
+    fitBtn.addEventListener('click', function() {
+      vncZoom.fit = true;
+      vncZoom.level = 0;
+      applyVncZoom();
+    });
+
     var winId = WinManager.open(winTitle, container, {
       type: 'vnc', full: true, noPadding: true,
+      headerActions: [cadBtn, pasteBtn, copyBtn, zoomOutBtn, zoomLabel, zoomInBtn, fitBtn],
       onClose: function() {
         if (window[vncKey]) {
           try { window[vncKey].disconnect(); } catch(e) {}
@@ -7809,6 +7955,12 @@ const App = {
       "    var pw = prompt('VNC password required:');\n" +
       "    if (pw) rfb.sendCredentials({ password: pw });\n" +
       "    else rfb.disconnect();\n" +
+      "  });\n" +
+      "  rfb.addEventListener('clipboard', function(e) {\n" +
+      "    if (e.detail && e.detail.text) {\n" +
+      "      window['" + clipTextKey + "'] = e.detail.text;\n" +
+      "      try { navigator.clipboard.writeText(e.detail.text); } catch(ex) {}\n" +
+      "    }\n" +
       "  });\n" +
       "  window['" + vncKey + "'] = rfb;\n" +
       "} catch(e) {\n" +
