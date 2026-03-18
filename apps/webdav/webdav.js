@@ -3626,7 +3626,7 @@ function main_dispatch(req) {
         // For ONLYOFFICE callback/fetch URLs: always use
         // host.docker.internal since ONLYOFFICE runs in
         // Docker on the same machine as Rampart
-        var ooRampartPort = (global.serverConf && global.serverConf.port) || 8088;
+        var ooRampartPort = (global.serverConf && global.serverConf.port > 0) ? global.serverConf.port : 8088;
         var ooDockerScheme = (global.serverConf && global.serverConf.secure) ? 'https://' : 'http://';
         var ooDockerOrigin = ooDockerScheme + 'host.docker.internal:' + ooRampartPort;
         var ooFetchUrl = ooDockerOrigin + '/dav/_office/fetch?file='
