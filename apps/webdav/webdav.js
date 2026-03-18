@@ -3623,10 +3623,12 @@ function main_dispatch(req) {
         var ooProto = getHeader(req.headers, 'X-Forwarded-Proto');
         var ooHost = getHeader(req.headers, 'X-Forwarded-Host') || req.path.host;
         var ooOrigin = (ooProto ? ooProto + '://' : req.path.scheme) + ooHost;
-        // For ONLYOFFICE callback/fetch URLs: replace localhost/127.0.0.1
-        // with host.docker.internal so the container can reach the host
-        var ooDockerHost = ooHost.replace(/^(localhost|127\.0\.0\.1)/, 'host.docker.internal');
-        var ooDockerOrigin = (ooProto ? ooProto + '://' : req.path.scheme) + ooDockerHost;
+        // For ONLYOFFICE callback/fetch URLs: always use
+        // host.docker.internal since ONLYOFFICE runs in
+        // Docker on the same machine as Rampart
+        var ooRampartPort = (global.serverConf && global.serverConf.port) || 8088;
+        var ooDockerScheme = (global.serverConf && global.serverConf.secure) ? 'https://' : 'http://';
+        var ooDockerOrigin = ooDockerScheme + 'host.docker.internal:' + ooRampartPort;
         var ooFetchUrl = ooDockerOrigin + '/dav/_office/fetch?file='
             + encodeURIComponent(ooFileParam)
             + '&token=' + encodeURIComponent(_ooSignFetchToken(ooDavRel, ooNow));

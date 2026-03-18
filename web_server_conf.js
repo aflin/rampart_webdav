@@ -357,6 +357,7 @@ if (demoMode) {
 }
 
 
+
 /* **************************************************** *
  *  ONLYOFFICE Document Server — detect, start, config *
  * **************************************************** */
@@ -437,7 +438,9 @@ if (!_oo.stat(ooCompose)) {
             var isRunning = _oo.shell("docker inspect -f '{{.State.Running}}' " + containerName + " 2>/dev/null");
             if (isRunning.stdout.trim() !== 'true') {
                 _oo.printf("ONLYOFFICE container '%s' is not running. Starting...\n", containerName);
-                var startResult = _oo.shell("docker-compose -f " + ooCompose + " up -d 2>&1");
+                var _dcCmd = _oo.exec("docker", "compose", "version").exitStatus === 0
+                    ? 'docker compose' : 'docker-compose';
+                var startResult = _oo.shell(_dcCmd + " -f " + ooCompose + " up -d 2>&1");
                 if (startResult.exitStatus !== 0) {
                     _oo.printf("WARNING: Failed to start ONLYOFFICE:\n%s\nDocument editing disabled.\n",
                         startResult.stdout + startResult.stderr);
@@ -451,6 +454,19 @@ if (!_oo.stat(ooCompose)) {
         }
 
         if (localOk) {
+            // Ensure rejectUnauthorized is false in local.json
+            // (host.docker.internal won't match the server's TLS cert)
+            var _ooPatched = _oo.shell(
+                "docker exec " + containerName + " python3 -c '" +
+                "import json; f=\"/etc/onlyoffice/documentserver/local.json\"; " +
+                "d=json.load(open(f)); " +
+                "co=d.setdefault(\"services\",{}).setdefault(\"CoAuthoring\",{}); " +
+                "r=co.get(\"requestDefaults\",{}).get(\"rejectUnauthorized\"); " +
+                "co.__setitem__(\"requestDefaults\",{\"rejectUnauthorized\":False}) if r is not False else None; " +
+                "json.dump(d,open(f,\"w\"),indent=2) if r is not False else None; " +
+                "print(\"patched\" if r is not False else \"ok\")' 2>/dev/null");
+            _oo.shell("docker exec " + containerName + " supervisorctl restart ds:docservice ds:converter 2>/dev/null");
+
             // Extract version prefix from container's nginx config
             var verResult = _oo.exec("docker", "exec", containerName,
                 "grep", "-oP", "\\d+\\.\\d+\\.\\d+(?=-\\$cache_tag)",
