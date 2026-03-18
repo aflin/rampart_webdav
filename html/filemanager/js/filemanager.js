@@ -7932,7 +7932,7 @@ const App = {
     var script = document.createElement('script');
     script.type = 'module';
     script.textContent =
-      "import RFB from '/filemanager/js/noVNC/core/rfb.js';\n" +
+      "import RFB from './js/noVNC/core/rfb.js';\n" +
       "var container = document.getElementById('" + containerId + "');\n" +
       "try {\n" +
       "  var creds = { password: '" + escapedPass + "' };\n" +
