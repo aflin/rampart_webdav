@@ -47,6 +47,7 @@ A self-hosted web file manager with a full-featured WebDAV backend, built on the
 - Scaling and resize support
 - Enabled per-user by admin
 - Note: Some VNC servers may use encodings that are not fully supported
+- **Warning:** The connection between Rampart and the VNC server is unencrypted. Screen data and keystrokes are sent in plaintext over TCP. This is safe when the VNC server is on the same machine as Rampart, but connections to remote VNC servers should be tunneled through SSH or a VPN.
 
 ### Plugin System
 
