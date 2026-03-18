@@ -62,9 +62,7 @@ if(module && module.exports) {
     var DAV_PREFIX = '/dav';
     var LOCK_KEY  = 'webdav_locks';
 
-    // Symlink traversal protection: only serve paths that resolve under these directories.
-    // Add additional paths here to allow symlinks pointing outside DAV_ROOT.
-    var allowedPaths = [ realPath(DAV_ROOT) ];
+    var DAV_ROOT_RESOLVED = realPath(DAV_ROOT);
 }
 
 function checkAllowedPath(fsPath) {
@@ -77,9 +75,22 @@ function checkAllowedPath(fsPath) {
         try { resolved = realPath(fsPath.substring(0, slash)); } catch(e) { return false; }
         if (!resolved) return false;
     }
-    for (var i = 0; i < allowedPaths.length; i++) {
-        if (resolved === allowedPaths[i] || resolved.indexOf(allowedPaths[i] + '/') === 0) {
-            return true;
+    // Always allow paths under DAV_ROOT
+    if (resolved === DAV_ROOT_RESOLVED || resolved.indexOf(DAV_ROOT_RESOLVED + '/') === 0) {
+        return true;
+    }
+    // Check external paths from LMDB
+    var stored = db.get(extpathsDbi, "", 10000);
+    if (stored && typeof stored === 'object') {
+        var keys = Object.keys(stored);
+        for (var i = 0; i < keys.length; i++) {
+            var ep = stored[keys[i]];
+            if (ep && ep.path) {
+                if (ep.path === '/') return true;
+                if (resolved === ep.path || resolved.indexOf(ep.path + '/') === 0) {
+                    return true;
+                }
+            }
         }
     }
     return false;
@@ -153,34 +164,11 @@ if (DEMO_MODE) {
     if (!stat(demoFilesPath)) mkdir(demoFilesPath);
 }
 
-// Load persisted external paths into allowedPaths
-if (typeof allowedPaths !== 'undefined') {
-    (function loadExternalPaths() {
-        var stored = db.get(extpathsDbi, "", 10000);
-        if (stored && typeof stored === 'object') {
-            var keys = Object.keys(stored);
-            for (var i = 0; i < keys.length; i++) {
-                var ep = stored[keys[i]];
-                if (ep && ep.path && allowedPaths.indexOf(ep.path) === -1) {
-                    allowedPaths.push(ep.path);
-                }
-            }
-        }
-    })();
-}
-
 function _addExternalPath(resolvedPath) {
-    if (allowedPaths.indexOf(resolvedPath) === -1) {
-        allowedPaths.push(resolvedPath);
-    }
     db.put(extpathsDbi, resolvedPath, { path: resolvedPath, added: new Date().toISOString() });
 }
 
 function _removeExternalPath(resolvedPath) {
-    var idx = allowedPaths.indexOf(resolvedPath);
-    if (idx > 0) { // never remove index 0 (DAV_ROOT)
-        allowedPaths.splice(idx, 1);
-    }
     db.del(extpathsDbi, resolvedPath);
 }
 
@@ -458,10 +446,8 @@ if (HAS_RCLONE) {
                     var mountName = parts[1];
                     if (username && mountName) {
                         var mp = getUserMountDir(username, mountName, cfg.rootMount);
-                        // Register in allowedPaths so WebDAV can serve the mount
-                        if (allowedPaths.indexOf(mp) === -1) {
-                            allowedPaths.push(mp);
-                        }
+                        // Register in external paths so WebDAV can serve the mount
+                        _addExternalPath(mp);
                         // SFTP mounts need encrypted credentials — skip auto-mount
                         if (cfg.provider === 'sftp') {
                             cfg.active = false;
@@ -5012,10 +4998,8 @@ function main_dispatch(req) {
         }
 
 
-        // Register mount point in allowedPaths
-        if (allowedPaths.indexOf(crMountPoint) === -1) {
-            allowedPaths.push(crMountPoint);
-        }
+        // Register mount point so WebDAV can serve it
+        _addExternalPath(crMountPoint);
 
         return _attachCookie({
             status: crMountResult.ok ? 201 : 200,
@@ -5056,8 +5040,7 @@ function main_dispatch(req) {
         if (delCfg.rootMount) db.del(rcloneDbi, '_rootmount/' + delMountName);
 
         var delMountPoint = getUserMountDir(delRcUser.username, delMountName, delCfg.rootMount);
-        var delIdx = allowedPaths.indexOf(delMountPoint);
-        if (delIdx > 0) allowedPaths.splice(delIdx, 1);
+        _removeExternalPath(delMountPoint);
 
         // Clean up thumbnails for the removed mount
         var delDavRel = delRcUser.username + '/' + delMountName;
