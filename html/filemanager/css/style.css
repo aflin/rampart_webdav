@@ -1319,6 +1319,8 @@ tr.drop-target-copy td:last-child::after {
   border-radius: 0;
   border: 0;
   z-index: 199999 !important;
+  height: auto;
+  bottom: 0;
 }
 
 .win.win-maximized .win-header {
