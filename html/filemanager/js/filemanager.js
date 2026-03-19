@@ -2417,7 +2417,7 @@ const FileList = {
   _container: null,
   _lastClickIndex: -1,
   _arrowAnchor: -1,
-  _isMobile: window.matchMedia('(max-width: 768px)').matches,
+  _isMobile: window.matchMedia('(pointer: coarse)').matches && ('ontouchstart' in window),
   _colWidths: {},  // persisted column widths { colKey: px }
 
   // All possible columns — name is always visible
@@ -2533,6 +2533,18 @@ const FileList = {
     const columns = this._getVisibleColumns();
     const self = this;
 
+    // Detect flex mode (mobile) — check after table is in DOM; for now peek at media query
+    var isFlex = window.matchMedia('(max-width: 1024px)').matches;
+
+    // Apply saved column widths: CSS variables in flex mode, inline styles in table mode
+    if (isFlex) {
+      columns.forEach(function(c) {
+        if (self._colWidths[c.key] && c.key !== 'name') {
+          table.style.setProperty('--col-' + c.key + '-w', self._colWidths[c.key] + 'px');
+        }
+      });
+    }
+
     // Body (created before header so resize closures can reference it)
     const tbody = document.createElement('tbody');
 
@@ -2554,8 +2566,8 @@ const FileList = {
       th.className = col.cls + (this.sortKey === col.key ? ' sorted' : '');
       th.textContent = col.label;
 
-      // Apply saved column width if available
-      if (self._colWidths[col.key]) {
+      // Apply saved column width if available (inline style for table-layout: fixed only)
+      if (self._colWidths[col.key] && !isFlex) {
         th.style.width = self._colWidths[col.key] + 'px';
       }
 
@@ -2577,51 +2589,96 @@ const FileList = {
         self._colWidths = {};
         self.render();
       });
-      grip.addEventListener('mousedown', function(e) {
-        e.preventDefault();
-        e.stopPropagation();
+      function startResize(startX) {
         grip.classList.add('active');
+        var isFlex = getComputedStyle(hrow).display === 'flex';
 
-        // Freeze all header cell widths so resizing is stable
-        var allThs = hrow.children;
-        for (var ci = 0; ci < allThs.length; ci++) {
-          if (!allThs[ci].style.width)
-            allThs[ci].style.width = allThs[ci].getBoundingClientRect().width + 'px';
+        if (isFlex) {
+          // Flex mode: freeze widths as CSS variables on the table
+          // so all rows (th and td) stay in sync
+          columns.forEach(function(c) {
+            var cTh = hrow.querySelector('.' + c.cls);
+            if (cTh) table.style.setProperty('--col-' + c.key + '-w', cTh.getBoundingClientRect().width + 'px');
+          });
+        } else {
+          // Fixed table layout: freeze header cell widths
+          var allThs = hrow.children;
+          for (var ci = 0; ci < allThs.length; ci++) {
+            if (!allThs[ci].style.width)
+              allThs[ci].style.width = allThs[ci].getBoundingClientRect().width + 'px';
+          }
         }
 
-        var startX = e.clientX;
         var startW = th.getBoundingClientRect().width;
-
         var lastTh = hrow.children[hrow.children.length - 1];
-        function onMove(ev) {
-          var delta = ev.clientX - startX;
-          var newW = Math.max(50, startW + delta);
-          th.style.width = newW + 'px';
-          // Absorb delta from the last column to keep table flush
-          if (lastTh && lastTh !== th) {
-            var containerW = table.parentNode.clientWidth;
-            var tableW = table.getBoundingClientRect().width;
-            if (tableW !== containerW) {
-              var lastW = lastTh.getBoundingClientRect().width;
-              var adjust = containerW - tableW;
-              var newLastW = lastW + adjust;
-              if (newLastW >= 50) lastTh.style.width = newLastW + 'px';
+        var lastCol = columns[columns.length - 1];
+
+        function doResize(clientX) {
+          var delta = clientX - startX;
+          var minW = col.key === 'name' ? 120 : 50;
+          var newW = Math.max(minW, startW + delta);
+
+          if (isFlex) {
+            table.style.setProperty('--col-' + col.key + '-w', newW + 'px');
+            // Absorb delta from last column
+            if (lastCol && lastCol.key !== col.key) {
+              var containerW = table.parentNode.clientWidth;
+              var totalW = 32; // col-check
+              columns.forEach(function(c) {
+                var v = table.style.getPropertyValue('--col-' + c.key + '-w');
+                if (v) totalW += parseFloat(v);
+              });
+              var diff = containerW - totalW;
+              var lastW = parseFloat(table.style.getPropertyValue('--col-' + lastCol.key + '-w')) || 50;
+              var newLastW = lastW + diff;
+              if (newLastW >= 50) table.style.setProperty('--col-' + lastCol.key + '-w', newLastW + 'px');
+            }
+          } else {
+            th.style.width = newW + 'px';
+            // Absorb delta from the last column to keep table flush
+            if (lastTh && lastTh !== th) {
+              var containerW = table.parentNode.clientWidth;
+              var tableW = table.getBoundingClientRect().width;
+              if (tableW !== containerW) {
+                var lastW = lastTh.getBoundingClientRect().width;
+                var adjust = containerW - tableW;
+                var newLastW = lastW + adjust;
+                if (newLastW >= 50) lastTh.style.width = newLastW + 'px';
+              }
             }
           }
         }
-        function onUp() {
+        function endResize() {
           grip.classList.remove('active');
-          // Capture all column widths from header
           columns.forEach(function(c) {
             var cTh = hrow.querySelector('.' + c.cls);
             if (cTh) self._colWidths[c.key] = cTh.getBoundingClientRect().width;
           });
-          document.removeEventListener('mousemove', onMove);
-          document.removeEventListener('mouseup', onUp);
+          document.removeEventListener('mousemove', onMouseMove);
+          document.removeEventListener('mouseup', onMouseUp);
+          document.removeEventListener('touchmove', onTouchMove);
+          document.removeEventListener('touchend', onTouchEnd);
         }
-        document.addEventListener('mousemove', onMove);
-        document.addEventListener('mouseup', onUp);
+        function onMouseMove(ev) { doResize(ev.clientX); }
+        function onMouseUp() { endResize(); }
+        function onTouchMove(ev) { ev.preventDefault(); doResize(ev.touches[0].clientX); }
+        function onTouchEnd() { endResize(); }
+
+        document.addEventListener('mousemove', onMouseMove);
+        document.addEventListener('mouseup', onMouseUp);
+        document.addEventListener('touchmove', onTouchMove, { passive: false });
+        document.addEventListener('touchend', onTouchEnd);
+      }
+      grip.addEventListener('mousedown', function(e) {
+        e.preventDefault();
+        e.stopPropagation();
+        startResize(e.clientX);
       });
+      grip.addEventListener('touchstart', function(e) {
+        e.preventDefault();
+        e.stopPropagation();
+        startResize(e.touches[0].clientX);
+      }, { passive: false });
       th.appendChild(grip);
 
       hrow.appendChild(th);
@@ -3490,7 +3547,25 @@ const FileList = {
     menu.className = 'context-menu col-context-menu';
     menu.setAttribute('role', 'menu');
 
+    // Detect which columns are CSS-hidden at current viewport
+    var testRow = document.createElement('tr');
+    testRow.style.cssText = 'position:absolute;visibility:hidden;pointer-events:none';
     for (const col of this.ALL_COLUMNS) {
+      var testTd = document.createElement('td');
+      testTd.className = col.cls;
+      testRow.appendChild(testTd);
+    }
+    var testTable = document.querySelector('.file-table') || document.createElement('table');
+    testTable.appendChild(testRow);
+    var hiddenCols = {};
+    for (const col of this.ALL_COLUMNS) {
+      var testTd = testRow.querySelector('.' + col.cls);
+      if (testTd && getComputedStyle(testTd).display === 'none') hiddenCols[col.key] = true;
+    }
+    testRow.remove();
+
+    for (const col of this.ALL_COLUMNS) {
+      if (hiddenCols[col.key]) continue;
       const btn = document.createElement('button');
       btn.className = 'ctx-item';
       const isVisible = this._visibleCols.indexOf(col.key) !== -1;
@@ -3876,8 +3951,9 @@ const Upload = {
 
     fileInput.addEventListener('change', () => {
       if (fileInput.files.length > 0) {
-        this.uploadFiles(fileInput.files, FileList.currentPath);
+        var files = Array.from(fileInput.files);
         fileInput.value = '';
+        this.uploadFiles(files, FileList.currentPath);
       }
     });
   },
@@ -4473,6 +4549,21 @@ const Viewers = {
     const wrap = document.createElement('div');
     wrap.className = 'image-viewer';
 
+    // 3-panel carousel track
+    var track = document.createElement('div');
+    track.className = 'imgview-track';
+    track.style.transform = 'translateX(-33.3333%)';
+    var panels = [];
+    for (var pi = 0; pi < 3; pi++) {
+      var panel = document.createElement('div');
+      panel.className = 'imgview-panel';
+      track.appendChild(panel);
+      panels.push(panel);
+    }
+    wrap.appendChild(track);
+    // panels[0]=prev, panels[1]=current, panels[2]=next
+    var curPanel = panels[1];
+
     // Load image to get natural dimensions (use cache-busted URL if edited)
     const probe = new Image();
     probe.src = Viewers._bustUrl(item.href);
@@ -4505,7 +4596,7 @@ const Viewers = {
       } else {
         panY = (vh - imgH) / 2;
       }
-      wrap.style.backgroundPosition = panX + 'px ' + panY + 'px';
+      curPanel.style.backgroundPosition = panX + 'px ' + panY + 'px';
     };
 
     // Zoom toward a point (or center)
@@ -4524,7 +4615,7 @@ const Viewers = {
       imgW *= factor;
       imgH *= factor;
       constrain();
-      wrap.style.backgroundSize = imgW + 'px ' + imgH + 'px';
+      curPanel.style.backgroundSize = imgW + 'px ' + imgH + 'px';
     };
 
     // Reset to fit-to-view
@@ -4541,24 +4632,54 @@ const Viewers = {
       panX = (vw - imgW) / 2;
       panY = (vh - imgH) / 2;
       fitX = panX; fitY = panY;
-      wrap.style.backgroundSize = imgW + 'px ' + imgH + 'px';
-      wrap.style.backgroundPosition = panX + 'px ' + panY + 'px';
+      curPanel.style.backgroundSize = imgW + 'px ' + imgH + 'px';
+      curPanel.style.backgroundPosition = panX + 'px ' + panY + 'px';
     };
+
+    // Set a panel's image fitted to the viewport (only shows after dimensions are known)
+    function setPanelImage(panel, imgItem) {
+      if (!imgItem) { panel.style.backgroundImage = ''; return; }
+      var url = Viewers._bustUrl(imgItem.href);
+      var img = new Image();
+      img.src = url;
+      var applyFit = function() {
+        var nw = img.naturalWidth || img.width;
+        var nh = img.naturalHeight || img.height;
+        if (!nw || !nh) return;
+        var vs = viewSize();
+        var vAspect = vs.w / vs.h;
+        var iAspect = nw / nh;
+        var w, h;
+        if (vAspect > iAspect) { h = vs.h; w = vs.h * iAspect; }
+        else { w = vs.w; h = vs.w / iAspect; }
+        panel.style.backgroundSize = w + 'px ' + h + 'px';
+        panel.style.backgroundPosition = ((vs.w - w) / 2) + 'px ' + ((vs.h - h) / 2) + 'px';
+        panel.style.backgroundImage = 'url("' + url.replace(/"/g, '\\"') + '")';
+      };
+      if (img.complete && img.naturalWidth) applyFit();
+      else img.onload = applyFit;
+    }
+
+    // Update all 3 panels based on current index
+    function updatePanels() {
+      setPanelImage(panels[0], curIdx > 0 ? imageItems[curIdx - 1] : null);
+      setPanelImage(panels[2], curIdx < imageItems.length - 1 ? imageItems[curIdx + 1] : null);
+      preloadAdjacent();
+    }
 
     // Initialize once image loads
     const initViewer = () => {
       natW = probe.naturalWidth || probe.width;
       natH = probe.naturalHeight || probe.height;
       if (!natW || !natH) return;
-      wrap.style.backgroundImage = 'url("' + probe.src.replace(/"/g, '\\"') + '")';
-      wrap.style.backgroundRepeat = 'no-repeat';
+      curPanel.style.backgroundImage = 'url("' + probe.src.replace(/"/g, '\\"') + '")';
       resetFit();
     };
 
     if (probe.complete && probe.naturalWidth) {
-      setTimeout(initViewer, 0);
+      setTimeout(function() { initViewer(); updatePanels(); }, 0);
     } else {
-      probe.onload = initViewer;
+      probe.onload = function() { initViewer(); updatePanels(); };
     }
 
     // Adaptive mousewheel zoom (from showfres)
@@ -4631,7 +4752,7 @@ const Viewers = {
       isSwiping = false;
       swipeOffset = 0;
       swipeLocked = false;
-      wrap.style.transition = 'none';
+      track.style.transition = 'none';
     }, { passive: true });
 
     wrap.addEventListener('touchmove', function(e) {
@@ -4665,8 +4786,9 @@ const Viewers = {
         } else {
           swipeOffset = totalDx;
         }
-        wrap.style.transform = 'translateX(' + swipeOffset + 'px)';
-        wrap.style.opacity = Math.max(0.3, 1 - Math.abs(swipeOffset) / (viewSize().w * 1.5));
+        // Slide the track: base position is -33.3333% (showing center panel)
+        var baseOffset = -(wrap.getBoundingClientRect().width);
+        track.style.transform = 'translateX(' + (baseOffset + swipeOffset) + 'px)';
         e.preventDefault();
       }
       touchLastX = t.clientX;
@@ -4678,49 +4800,84 @@ const Viewers = {
       var threshold = viewSize().w * 0.2;  // 20% of viewport width
       var navigated = false;
 
+      var ww = wrap.getBoundingClientRect().width;
       if (isSwiping && Math.abs(swipeOffset) > threshold) {
         if (swipeOffset < 0 && curIdx < imageItems.length - 1) {
           stopSlideshow();
-          // Animate out to the left, then swap
-          wrap.style.transition = 'transform 0.15s ease-out, opacity 0.15s ease-out';
-          wrap.style.transform = 'translateX(' + (-viewSize().w) + 'px)';
-          wrap.style.opacity = '0';
           navigated = true;
+          // Slide track to show next panel (panels[2])
+          track.style.transition = 'transform 0.2s ease-out';
+          track.style.transform = 'translateX(' + (-ww * 2) + 'px)';
           setTimeout(function() {
-            swapImage(imageItems[curIdx + 1]);
-            // Slide in from right
-            wrap.style.transition = 'none';
-            wrap.style.transform = 'translateX(' + viewSize().w + 'px)';
-            wrap.style.opacity = '0';
-            void wrap.offsetHeight;  // force reflow before animating
-            wrap.style.transition = 'transform 0.15s ease-out, opacity 0.15s ease-out';
-            wrap.style.transform = 'translateX(0)';
-            wrap.style.opacity = '1';
-          }, 150);
+            curIdx = curIdx + 1;
+            curItem = imageItems[curIdx];
+            updateNavState();
+            WinManager.setTitle(winId, curItem.name);
+            // Rotate panels: move first panel to end
+            var first = panels.shift();
+            panels.push(first);
+            track.appendChild(first);
+            curPanel = panels[1];
+            // Update natW/natH from cached image
+            var tmp = new Image();
+            tmp.src = Viewers._bustUrl(curItem.href);
+            if (tmp.complete) {
+              natW = tmp.naturalWidth; natH = tmp.naturalHeight;
+              var sz = curPanel.style.backgroundSize.split(' ');
+              imgW = fitW = parseFloat(sz[0]) || imgW;
+              imgH = fitH = parseFloat(sz[1]) || imgH;
+              var ps = curPanel.style.backgroundPosition.split(' ');
+              panX = fitX = parseFloat(ps[0]) || 0;
+              panY = fitY = parseFloat(ps[1]) || 0;
+            }
+            // Snap track back to center (panel order changed, so this shows new curPanel)
+            track.style.transition = 'none';
+            track.style.transform = 'translateX(' + (-ww) + 'px)';
+            void track.offsetHeight;
+            // Update the new last panel (next image)
+            setPanelImage(panels[2], curIdx < imageItems.length - 1 ? imageItems[curIdx + 1] : null);
+            setPanelImage(panels[0], curIdx > 0 ? imageItems[curIdx - 1] : null);
+          }, 200);
         } else if (swipeOffset > 0 && curIdx > 0) {
           stopSlideshow();
-          wrap.style.transition = 'transform 0.15s ease-out, opacity 0.15s ease-out';
-          wrap.style.transform = 'translateX(' + viewSize().w + 'px)';
-          wrap.style.opacity = '0';
           navigated = true;
+          // Slide track to show prev panel (panels[0])
+          track.style.transition = 'transform 0.2s ease-out';
+          track.style.transform = 'translateX(0)';
           setTimeout(function() {
-            swapImage(imageItems[curIdx - 1]);
-            wrap.style.transition = 'none';
-            wrap.style.transform = 'translateX(' + (-viewSize().w) + 'px)';
-            wrap.style.opacity = '0';
-            void wrap.offsetHeight;  // force reflow before animating
-            wrap.style.transition = 'transform 0.15s ease-out, opacity 0.15s ease-out';
-            wrap.style.transform = 'translateX(0)';
-            wrap.style.opacity = '1';
-          }, 150);
+            curIdx = curIdx - 1;
+            curItem = imageItems[curIdx];
+            updateNavState();
+            WinManager.setTitle(winId, curItem.name);
+            // Rotate panels: move last panel to beginning
+            var last = panels.pop();
+            panels.unshift(last);
+            track.insertBefore(last, track.firstChild);
+            curPanel = panels[1];
+            var tmp = new Image();
+            tmp.src = Viewers._bustUrl(curItem.href);
+            if (tmp.complete) {
+              natW = tmp.naturalWidth; natH = tmp.naturalHeight;
+              var sz = curPanel.style.backgroundSize.split(' ');
+              imgW = fitW = parseFloat(sz[0]) || imgW;
+              imgH = fitH = parseFloat(sz[1]) || imgH;
+              var ps = curPanel.style.backgroundPosition.split(' ');
+              panX = fitX = parseFloat(ps[0]) || 0;
+              panY = fitY = parseFloat(ps[1]) || 0;
+            }
+            track.style.transition = 'none';
+            track.style.transform = 'translateX(' + (-ww) + 'px)';
+            void track.offsetHeight;
+            setPanelImage(panels[0], curIdx > 0 ? imageItems[curIdx - 1] : null);
+            setPanelImage(panels[2], curIdx < imageItems.length - 1 ? imageItems[curIdx + 1] : null);
+          }, 200);
         }
       }
 
       if (!navigated) {
-        // Snap back
-        wrap.style.transition = 'transform 0.2s ease-out, opacity 0.2s ease-out';
-        wrap.style.transform = 'translateX(0)';
-        wrap.style.opacity = '1';
+        // Snap back to center
+        track.style.transition = 'transform 0.2s ease-out';
+        track.style.transform = 'translateX(' + (-ww) + 'px)';
       }
     });
 
@@ -4763,19 +4920,34 @@ const Viewers = {
     var curIdx = imageItems.findIndex(function(it) { return it.href === item.href; });
     var curItem = curIdx >= 0 ? imageItems[curIdx] : item;
 
-    function swapImage(newItem) {
+    var _preloaded = {};
+    function preloadAdjacent() {
+      [curIdx - 1, curIdx + 1].forEach(function(i) {
+        if (i >= 0 && i < imageItems.length) {
+          var url = Viewers._bustUrl(imageItems[i].href);
+          if (!_preloaded[url]) {
+            var p = new Image();
+            p.src = url;
+            _preloaded[url] = true;
+          }
+        }
+      });
+    }
+
+    function swapImage(newItem, preloadedImg) {
       curItem = newItem;
       curIdx = imageItems.indexOf(newItem);
       updateNavState();
       WinManager.setTitle(winId, newItem.name);
-      var img = new Image();
-      img.src = Viewers._bustUrl(newItem.href);
+      var img = preloadedImg || new Image();
+      if (!preloadedImg) img.src = Viewers._bustUrl(newItem.href);
       var doSwap = function() {
         natW = img.naturalWidth || img.width;
         natH = img.naturalHeight || img.height;
         if (!natW || !natH) return;
-        wrap.style.backgroundImage = 'url("' + img.src.replace(/"/g, '\\"') + '")';
+        curPanel.style.backgroundImage = 'url("' + img.src.replace(/"/g, '\\"') + '")';
         resetFit();
+        updatePanels();
       };
       if (img.complete && img.naturalWidth) doSwap();
       else img.onload = doSwap;
@@ -5416,6 +5588,9 @@ const Viewers = {
         player.on('userinactive', () => {
           if (!player.paused()) wrap.style.cursor = 'none';
         });
+
+        // Touch: tap video to toggle controls (scoped to player element only)
+        // TODO: video controls on mobile need fixing — controls are off-screen
 
         // Re-hook ended event on the video.js managed element
         player.on('ended', function() {
@@ -7978,8 +8153,11 @@ const App = {
     const menuW = menu.offsetWidth || 180;
     const menuH = menu.offsetHeight || 250;
     var statusbarH = 28;
+    var maxH = window.innerHeight - 20;
+    menu.style.maxHeight = maxH + 'px';
     const x = Math.min(e.clientX, window.innerWidth - menuW);
-    const y = Math.min(e.clientY, window.innerHeight - menuH - statusbarH);
+    var y = Math.min(e.clientY, window.innerHeight - menuH - statusbarH);
+    if (menuH >= maxH) y = 10;
     menu.style.left = x + 'px';
     menu.style.top = y + 'px';
 
