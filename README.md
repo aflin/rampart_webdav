@@ -248,4 +248,26 @@ web_server/
 
 MIT
 
-noVNC client library is licensed under MPL 2.0 (see `html/filemanager/js/noVNC/LICENSE.txt`).
+## Third-Party Libraries
+
+This project uses the following open-source libraries:
+
+| Library | License | Website |
+|---|---|---|
+| [Rampart](https://github.com/aflin/rampart) | MIT | Web server and runtime |
+| [CodeMirror 6](https://codemirror.net/) | MIT | Code/text editor |
+| [Video.js](https://videojs.com/) | Apache-2.0 | Video player |
+| [PDF.js](https://mozilla.github.io/pdf.js/) | Apache-2.0 | PDF renderer (Mozilla) |
+| [Jodit](https://xdsoft.net/jodit/) | MIT | WYSIWYG HTML editor |
+| [Filerobot Image Editor](https://github.com/scaleflex/filerobot-image-editor) | MIT | Image editor (Scaleflex) |
+| [noVNC](https://novnc.com/) | MPL-2.0 | VNC client |
+| [xterm.js](https://xtermjs.org/) | MIT | Terminal emulator |
+| [epub.js](https://github.com/futurepress/epub.js) | BSD-2-Clause | EPUB reader |
+| [JSZip](https://stuk.github.io/jszip/) | MIT / GPLv3 | ZIP library |
+| [marked](https://marked.js.org/) | MIT | Markdown parser |
+| [jsmediatags](https://github.com/aadsm/jsmediatags) | BSD-3-Clause | Audio metadata reader |
+| [Ace Editor](https://ace.c9.io/) | BSD-3-Clause | Code editor (used by Jodit) |
+| [js-beautify](https://github.com/beautify-web/js-beautify) | MIT | HTML formatter (used by Jodit) |
+| [@uiw/codemirror-themes](https://github.com/uiwjs/react-codemirror) | MIT | CodeMirror themes |
+
+See `html/js/local/LICENSES.md` for details when using locally hosted copies.

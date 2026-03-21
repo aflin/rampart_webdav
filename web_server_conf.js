@@ -362,6 +362,13 @@ if (demoMode) {
 
 
 /* **************************************************** *
+ *  Docker mode — disable daemon so container stays up *
+ * **************************************************** */
+if (process.env.RAMPART_DOCKER === '1') {
+    serverConf.daemon = false;
+}
+
+/* **************************************************** *
  *  ONLYOFFICE Document Server — detect, start, config *
  * **************************************************** */
 var _oo = rampart.utils;
@@ -369,6 +376,51 @@ var _oo = rampart.utils;
 global.OO_AVAILABLE = false;
 global.OO_JWT_SECRET = '';
 global.OO_PORT = 0;
+
+// When running inside Docker (both containers on same compose network),
+// ONLYOFFICE is reachable at http://onlyoffice:80 and Rampart at http://rampart:PORT.
+// The JWT_SECRET is passed via environment variable.
+var isDocker = (process.env.RAMPART_DOCKER === '1');
+
+if (isDocker && process.env.OO_JWT_SECRET) {
+    var jwtSecret = process.env.OO_JWT_SECRET;
+    var ooBase = 'http://onlyoffice:80';
+
+    // In Docker mode, entrypoint.sh waits for ONLYOFFICE to be healthy
+    // before starting Rampart, so we can fetch the version immediately.
+    _oo.printf("Docker mode: configuring ONLYOFFICE at %s ...\n", ooBase);
+
+    // Extract version from api.js, cache tag from HASH env (defaults to 0)
+    var _ooVer = require("rampart-curl").fetch(ooBase + '/web-apps/apps/api/documents/api.js', {"max-time": 5});
+    var _ooVerMatch = _ooVer.text ? _ooVer.text.match(/(\d+\.\d+\.\d+)/) : null;
+    var _ooCacheTag = process.env.OO_HASH || '0';
+    if (!_ooVerMatch) {
+        _oo.printf("WARNING: Could not determine ONLYOFFICE version. Document editing disabled.\n");
+    } else {
+        var ooPrefix = '/' + _ooVerMatch[1] + '-' + _ooCacheTag + '/';
+        var ooRoutes = [
+            '/web-apps/', '/sdkjs/', '/sdkjs-plugins/', '/fonts/',
+            '/dictionaries/', '/cache/', '/doc/', '/coauthoring/'
+        ];
+        for (var i = 0; i < ooRoutes.length; i++) {
+            serverConf.appendMap[ooRoutes[i]] = { proxy: ooBase + ooRoutes[i] };
+        }
+        serverConf.appendMap['/healthcheck'] = { proxy: ooBase + '/healthcheck' };
+        serverConf.appendMap[ooPrefix] = { proxy: ooBase + ooPrefix };
+
+        global.OO_AVAILABLE = true;
+        global.OO_JWT_SECRET = jwtSecret;
+        global.OO_PORT = 80;
+        global.OO_DOCKER_MODE = true;
+        _oo.printf("ONLYOFFICE ready (Docker mode, version prefix: %s).\n", ooPrefix);
+    }
+
+} else if (isDocker) {
+    _oo.printf("Docker mode: OO_JWT_SECRET not set. ONLYOFFICE document editing disabled.\n");
+
+} else {
+
+// --- Standalone mode: manage ONLYOFFICE container from host ---
 
 var ooDir = working_directory + '/onlyoffice';
 var ooCompose = ooDir + '/docker-compose.yml';
@@ -506,6 +558,14 @@ if (!_oo.stat(ooCompose)) {
         }
     }
 }
+} // end standalone/docker if-else
+
+/* **************************************************** *
+ *  Search indexing lock (must be global before server  *
+ *  start so threads get a copy)                        *
+ * **************************************************** */
+global.indexLock = new rampart.lock();
+global.thrlock = new rampart.lock();
 
 /* **************************************************** *
  *  process command line options and start/stop server  *

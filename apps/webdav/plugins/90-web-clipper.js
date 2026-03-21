@@ -68,8 +68,21 @@ module.exports = {
     dropPattern: /^https?:\/\//i,
 
     drop: function(url, fsDir, davDir, choice) {
-        // First call — ask what format to save
+        // Check if URL points to a non-HTML file — if so, pass to the default URL fetcher
         if (!choice) {
+            // Extract filename from URL path
+            var urlPath = '';
+            try {
+                var pathMatch = url.match(/^https?:\/\/[^\/]+(\/[^?#]*)/i);
+                urlPath = pathMatch ? pathMatch[1].replace(/\/+$/, '') : '';
+            } catch(e) {}
+            var urlFilename = urlPath ? decodeURIComponent(urlPath.split('/').pop()) : '';
+
+            // If URL has a non-HTML extension, let the default fetcher handle it
+            if (urlFilename && /\.[a-z0-9]+$/i.test(urlFilename) && !/\.html?$/i.test(urlFilename)) {
+                return { pass: true };
+            }
+
             return {
                 prompt: true,
                 title: 'Save "' + url.substring(0, 80) + (url.length > 80 ? '...' : '') + '"',

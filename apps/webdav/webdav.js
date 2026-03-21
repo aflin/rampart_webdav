@@ -13,6 +13,12 @@ var Lmdb = require("rampart-lmdb");
 var gm = require("rampart-gm");
 var curl = require("rampart-curl");
 var server = require("rampart-server");
+var Sql = require("rampart-sql");
+var totext = require("rampart-totext");
+
+// Allow search indexing of mounted (rclone/FUSE) directories
+// Set global.allowMountedSearch = true in web_server_conf.js to enable
+if (global.allowMountedSearch === undefined) global.allowMountedSearch = false;
 
 /* ============================================================
  * Section 1: Configuration & Constants
@@ -57,6 +63,7 @@ try { dataRoot = realPath(dataRoot) || dataRoot; } catch(e) {}
 var DAV_ROOT  = dataRoot + '/webdav_root';
 if (!stat(DAV_ROOT)) mkdir(DAV_ROOT);
 try { DAV_ROOT = realPath(DAV_ROOT) || DAV_ROOT; } catch(e) {}
+var DAV_ROOT_DEV = stat(DAV_ROOT).dev;
 
 if(module && module.exports) {
     var DAV_PREFIX = '/dav';
@@ -802,12 +809,817 @@ function handleThumb(req, davRelPath, fsPath) {
 
 var SUPPORTED_METHODS = 'OPTIONS, GET, HEAD, PUT, DELETE, MKCOL, COPY, MOVE, PROPFIND, PROPPATCH, LOCK, UNLOCK';
 
-// POSIX mutex for compound lock operations (global so it's shared across threads)
-var thrlock = new rampart.lock();
+
+
+/* ============================================================
+ * Section 1d: Full-Text Search Engine
+ *
+ * Uses rampart-sql (Texis) for full-text indexing and search,
+ * and rampart-totext for extracting text from documents.
+ *
+ * Single table for all indexed documents. Access control is
+ * enforced at query time by filtering on path visibility.
+ *
+ * All indexing operations run in a dedicated background thread
+ * via a task queue stored in LMDB.
+ * ============================================================ */
+
+var SEARCH_DB_PATH = dataRoot + '/search_db';
+var SEARCH_LOG = process.scriptPath + '/logs/index.log';
+
+// File types that can be indexed (totext-supported + plain text subtitles)
+var SEARCH_EXTENSIONS = /\.(txt|html?|md|markdown|xml|rtf|tex|latex|csv|json|docx|pptx|xlsx|odt|odp|ods|epub|pdf|doc|srt|vtt)$/i;
+
+// Default indexed subdirectory name under each user's home
+var SEARCH_DEFAULT_DIR = 'Documents';
+
+// Which directories are indexed — stored in LMDB
+var searchDbi = db.openDb("searchdirs", true);
+
+// Task queue for the indexing thread — stored in LMDB
+var indexQueueDbi = db.openDb("indexqueue", true);
+
+// Decode a davRelPath for search DB operations (DB stores decoded paths)
+function searchDecodePath(davRelPath) {
+    try { return decodeURIComponent(davRelPath); } catch(e) { return davRelPath; }
+}
+
+// Get all indexed directory paths
+function searchGetIndexedDirs() {
+    var all = db.get(searchDbi, "", 10000);
+    var dirs = [];
+    if (all) {
+        var keys = Object.keys(all);
+        for (var i = 0; i < keys.length; i++) {
+            if (all[keys[i]] && all[keys[i]].enabled) dirs.push(keys[i]);
+        }
+    }
+    return dirs;
+}
+
+// Check if a file path is inside any indexed directory
+function searchIsIndexed(davRelPath) {
+    var dirs = searchGetIndexedDirs();
+    var path = searchDecodePath(davRelPath).replace(/\/?$/, '');
+    for (var i = 0; i < dirs.length; i++) {
+        var dir = dirs[i].replace(/\/?$/, '/');
+        if ((path + '/').indexOf(dir) === 0 || path.indexOf(dir) === 0) return true;
+    }
+    return false;
+}
+
+
+// Check if a directory has an indexed parent
+function searchGetIndexedParent(davRelPath) {
+    var dirs = searchGetIndexedDirs();
+    var path = davRelPath.replace(/\/?$/, '/');
+    for (var i = 0; i < dirs.length; i++) {
+        var dir = dirs[i].replace(/\/?$/, '/');
+        if (path.indexOf(dir) === 0 && path !== dir) return dirs[i];
+    }
+    return null;
+}
+
+// --- Task Queue ---
+// Keys are ISO timestamps with a random suffix for uniqueness and sort order
+// Values are JSON objects: {op, ...params}
+
+function indexQueueKey() {
+    return new Date().toISOString() + '|' + hexify(crypto.rand(4));
+}
+
+function indexQueuePush(task) {
+    db.put(indexQueueDbi, indexQueueKey(), task);
+}
+
+// Public API: queue indexing operations from any server thread
+
+function searchSkipFile(fsPath) {
+    var name = fsPath.substring(fsPath.lastIndexOf('/') + 1);
+    if (name.indexOf('.~') === 0) return true;  // LibreOffice/OnlyOffice autosave and lock files
+    if (name.charAt(0) === '~' && name.charAt(1) === '$') return true;  // MS Office temp files
+    return false;
+}
+
+function searchIndexFile(fsPath, davRelPath) {
+    var decoded = searchDecodePath(davRelPath);
+    // Always update path index (unless skipped)
+    if (!searchSkipFile(fsPath)) {
+        pathIndexFile(davRelPath, false);
+    }
+    // Document content index — only for supported extensions in indexed dirs
+    if (searchSkipFile(fsPath)) return;
+    if (!SEARCH_EXTENSIONS.test(fsPath)) return;
+    if (!searchIsIndexed(davRelPath)) return;
+    indexQueuePush({op: 'index', fsPath: fsPath, davRelPath: decoded});
+}
+
+function searchDeleteFile(davRelPath) {
+    pathDeleteFile(davRelPath);
+    indexQueuePush({op: 'delete', davRelPath: searchDecodePath(davRelPath)});
+}
+
+function searchDeleteDir(davRelPath) {
+    pathDeleteDir(davRelPath);
+    indexQueuePush({op: 'deletedir', davRelPath: searchDecodePath(davRelPath)});
+}
+
+function searchMovePath(oldDavRel, newDavRel) {
+    var oldPath = searchDecodePath(oldDavRel);
+    var newPath = searchDecodePath(newDavRel);
+
+    // Path index: always update
+    pathMovePath(oldDavRel, newDavRel);
+
+    // Doc content index: depends on indexed dirs
+    var destIndexed = searchIsIndexed(newDavRel);
+    var srcIndexed = searchIsIndexed(oldDavRel);
+
+    if (destIndexed && srcIndexed) {
+        indexQueuePush({op: 'move', oldPath: oldPath, newPath: newPath});
+    } else if (srcIndexed) {
+        indexQueuePush({op: 'delete', davRelPath: oldPath});
+    } else if (destIndexed) {
+        indexQueuePush({op: 'index', fsPath: DAV_ROOT + newPath, davRelPath: newPath});
+    }
+}
+
+function searchMoveDir(oldDavRel, newDavRel) {
+    var oldPath = searchDecodePath(oldDavRel);
+    var newPath = searchDecodePath(newDavRel);
+
+    // Path index: always update
+    pathMoveDir(oldDavRel, newDavRel);
+
+    // Doc content index: depends on indexed dirs
+    var destIndexed = searchIsIndexed(newDavRel);
+    var srcIndexed = searchIsIndexed(oldDavRel);
+
+    if (destIndexed && srcIndexed) {
+        indexQueuePush({op: 'movedir', oldPath: oldPath, newPath: newPath});
+    } else if (srcIndexed) {
+        indexQueuePush({op: 'deletedir', davRelPath: oldPath});
+    } else if (destIndexed) {
+        indexQueuePush({op: 'scan', davRelPath: newPath, fsPath: DAV_ROOT + newPath});
+    }
+}
+
+function searchEnableDir(davRelPath) {
+    db.put(searchDbi, davRelPath, {enabled: true});
+    indexQueuePush({op: 'scan', davRelPath: davRelPath, fsPath: DAV_ROOT + davRelPath});
+}
+
+function searchDisableDir(davRelPath) {
+    db.del(searchDbi, davRelPath);
+    indexQueuePush({op: 'deletedir', davRelPath: davRelPath});
+}
+
+function searchScanDir(fsBase, davRelBase) {
+    indexQueuePush({op: 'scan', davRelPath: davRelBase, fsPath: fsBase});
+}
+
+// --- Path index queue functions ---
+
+function pathIndexFile(davRelPath, isDir) {
+    indexQueuePush({op: 'path_index', davRelPath: searchDecodePath(davRelPath), isDir: !!isDir});
+}
+
+function pathDeleteFile(davRelPath) {
+    indexQueuePush({op: 'path_delete', davRelPath: searchDecodePath(davRelPath)});
+}
+
+function pathDeleteDir(davRelPath) {
+    indexQueuePush({op: 'path_deletedir', davRelPath: searchDecodePath(davRelPath)});
+}
+
+function pathMovePath(oldDavRel, newDavRel) {
+    indexQueuePush({op: 'path_move', oldPath: searchDecodePath(oldDavRel), newPath: searchDecodePath(newDavRel)});
+}
+
+function pathMoveDir(oldDavRel, newDavRel) {
+    indexQueuePush({op: 'path_movedir', oldPath: searchDecodePath(oldDavRel), newPath: searchDecodePath(newDavRel)});
+}
+
+// --- Seed defaults ---
+// Add each user's Documents/ as indexed if not already present
+(function searchSeedDefaults() {
+    var users = db.get(userDbi, "", 10000);
+    if (users) {
+        var userNames = Object.keys(users);
+        for (var si = 0; si < userNames.length; si++) {
+            var uname = userNames[si];
+            var docsDav = '/' + uname + '/' + SEARCH_DEFAULT_DIR;
+            var docsFs = DAV_ROOT + docsDav;
+            if (stat(docsFs) && !db.get(searchDbi, docsDav)) {
+                db.put(searchDbi, docsDav, {enabled: true});
+            }
+        }
+    }
+})();
+
+// --- Launch indexing thread ---
+// Initial scans are NOT queued here. They are triggered inside the
+// indexing thread only when tables are first created (empty DB).
+// After that, incremental updates happen via PUT/DELETE/MOVE/COPY hooks
+// and the nightly scheduled index optimization handles the rest.
+
+// Start the indexing service thread (once per server lifetime)
+(function startIndexService() {
+    indexLock.lock();
+    try {
+        if (rampart.thread.get('indexServiceStarted')) {
+            indexLock.unlock();
+            return;
+        }
+
+        var thr = new rampart.thread();
+        thr.exec(
+            // --- Thread function: runs in dedicated thread ---
+            function(cfg) {
+                var u = rampart.utils;
+                var _Sql = require("rampart-sql");
+                var _totext = require("rampart-totext");
+                var _Lmdb = require("rampart-lmdb");
+
+                // Open our own handles
+                var _db = new _Lmdb.init(cfg.dbPath, true, {conversion: 'JSON', mapSize: 64});
+                var _queueDbi = _db.openDb("indexqueue", true);
+                var _searchDbi = _db.openDb("searchdirs", true);
+
+                var _sql = new _Sql.connection(cfg.searchDbPath, true);
+
+                // Ensure the docs table exists — initial scan on first creation
+                var docsCreated = false;
+                if (!_sql.one("SELECT * FROM SYSTABLES WHERE NAME = ?", ['docs'])) {
+                    _sql.exec(
+                        "CREATE TABLE docs (" +
+                        "  path varchar(512), " +
+                        "  title varchar(255), " +
+                        "  content varchar(1000000), " +
+                        "  mtime int, " +
+                        "  size int" +
+                        ")"
+                    );
+                    _sql.exec(```CREATE FULLTEXT INDEX docs_content_ftx ON docs(content)
+                        WITH WORDEXPRESSIONS (
+                          '[\alnum\x80-\xFF]{2,99}',
+                          '[\alnum\x80-\xFF$<>%@\-_+]{2,99}'
+                        )```);
+                    _sql.exec("CREATE INDEX docs_path_idx ON docs(path)");
+                    try {
+                        _sql.scheduleUpdate('docs_content_ftx', '02:00', 'every day', 1000);
+                        log("Fulltext index update scheduled: daily at 02:00, threshold 1000");
+                    } catch(e) {
+                        log("Failed to schedule fulltext index update: " + e.message);
+                    }
+                    docsCreated = true;
+                }
+
+                // --- Paths table: filename search ---
+                var pathsCreated = false;
+                if (!_sql.one("SELECT * FROM SYSTABLES WHERE NAME = ?", ['paths'])) {
+                    _sql.exec(
+                        "CREATE TABLE paths (" +
+                        "  path varchar(512), " +
+                        "  pathrev varchar(512), " +
+                        "  isdir int" +
+                        ")"
+                    );
+                    _sql.exec("CREATE INDEX paths_path_idx ON paths(path)");
+                    _sql.exec("CREATE INDEX paths_pathrev_idx ON paths(pathrev)");
+                    _sql.exec(```CREATE FULLTEXT INDEX paths_path_ftx ON paths(path)
+                        WITH WORDEXPRESSIONS (
+                          '[\alnum\x80-\xFF]{2,99}'
+                        )```);
+                    try {
+                        _sql.scheduleUpdate('paths_path_ftx', '02:00', 'every day', 1000);
+                    } catch(e) {}
+                    pathsCreated = true;
+                }
+
+                function reversePath(p) {
+                    return p.split('').reverse().join('');
+                }
+
+                var EXTENSIONS = /\.(txt|html?|md|markdown|xml|rtf|tex|latex|csv|json|docx|pptx|xlsx|odt|odp|ods|epub|pdf|doc|srt|vtt)$/i;
+
+                // Skip autosave/temp files
+                function skipName(name) {
+                    if (name.indexOf('.~') === 0) return true;
+                    if (name.charAt(0) === '~' && name.charAt(1) === '$') return true;
+                    return false;
+                }
+
+                // Check if a path is a mount point (different device than parent)
+                function isMountPoint(fsPath) {
+                    try {
+                        var mpStat = u.stat(fsPath);
+                        if (!mpStat || !mpStat.isDirectory) return false;
+                        var parentDir = fsPath.replace(/\/[^\/]+\/?$/, '') || '/';
+                        var parentStat = u.stat(parentDir);
+                        if (!parentStat) return false;
+                        return mpStat.dev !== parentStat.dev;
+                    } catch(e) { return false; }
+                }
+
+                function log(msg) {
+                    u.fprintf(cfg.logFile, true, "%s %s\n", new Date().toISOString(), msg);
+                }
+
+                // Index a single file
+                function doIndex(fsPath, davRelPath) {
+                    if (!EXTENSIONS.test(fsPath)) return;
+                    var fsStat = u.stat(fsPath);
+                    if (!fsStat || fsStat.isDirectory || fsStat.size === 0) return;
+
+                    // Check if already indexed with same mtime
+                    var existing = _sql.one("SELECT mtime FROM docs WHERE path = ?", [davRelPath]);
+                    if (existing && existing.mtime === Math.floor(fsStat.mtime / 1000)) return;
+
+                    var text;
+                    try {
+                        text = _totext.convertFile(fsPath);
+                    } catch(e) {
+                        log("totext error for " + davRelPath + ": " + e.message);
+                        return;
+                    }
+                    if (!text || !text.length) return;
+
+                    var title = fsPath.substring(fsPath.lastIndexOf('/') + 1);
+                    var dotIdx = title.lastIndexOf('.');
+                    if (dotIdx > 0) title = title.substring(0, dotIdx);
+
+                    var res = _sql.exec("DELETE FROM docs WHERE path = ?", [davRelPath]);
+                    _sql.exec("INSERT INTO docs VALUES (?, ?, ?, ?, ?)",
+                        [davRelPath, title, text, Math.floor(fsStat.mtime / 1000), fsStat.size]);
+                }
+
+                // Recursively scan and index a directory
+                function doScan(fsBase, davRelBase) {
+                    var entries;
+                    try { entries = u.readdir(fsBase, true); } catch(e) {
+                        log("scan readdir error for " + davRelBase + ": " + e.message);
+                        return;
+                    }
+                    for (var i = 0; i < entries.length; i++) {
+                        var ename = entries[i];
+                        if (ename === '.' || ename === '..') continue;
+                        if (ename.indexOf('.~') === 0 || (ename.charAt(0) === '~' && ename.charAt(1) === '$')) continue;
+                        var childFs = fsBase + '/' + ename;
+                        var childDav = davRelBase.replace(/\/?$/, '/') + ename;
+                        var childSt = u.stat(childFs);
+                        if (!childSt) continue;
+                        if (childSt.isDirectory) {
+                            doScan(childFs, childDav);
+                        } else {
+                            doIndex(childFs, childDav);
+                        }
+                    }
+                }
+
+                function doDelete(davRelPath) {
+                    var res = _sql.exec("DELETE FROM docs WHERE path = ?", [davRelPath]);
+                    if (res.rowCount === 0) log("delete: no match for " + davRelPath);
+                }
+
+                function doDeleteDir(davRelPath) {
+                    var prefix = davRelPath.replace(/\/?$/, '/');
+                    _sql.exec("DELETE FROM docs WHERE path MATCHES ?", [prefix + '%']);
+                }
+
+                function doMove(oldPath, newPath) {
+                    var res = _sql.exec("UPDATE docs SET path = ? WHERE path = ?", [newPath, oldPath]);
+                    if (res.rowCount === 0) log("move: no match for " + oldPath);
+                }
+
+                function doMoveDir(oldPath, newPath) {
+                    var oldPrefix = oldPath.replace(/\/?$/, '/');
+                    var newPrefix = newPath.replace(/\/?$/, '/');
+                    var rows = _sql.exec("SELECT path FROM docs WHERE path MATCHES ?", {maxRows: 100000}, [oldPrefix + '%']);
+                    if (rows.rows) {
+                        for (var i = 0; i < rows.rows.length; i++) {
+                            var op = rows.rows[i].path;
+                            var np = newPrefix + op.substring(oldPrefix.length);
+                            _sql.exec("UPDATE docs SET path = ? WHERE path = ?", [np, op]);
+                        }
+                    }
+                }
+
+                // --- Path index operations ---
+
+                function doPathIndex(davRelPath, isDir) {
+                    // Delete old entry if exists
+                    _sql.exec("DELETE FROM paths WHERE path = ?", [davRelPath]);
+                    _sql.exec("INSERT INTO paths VALUES (?, ?, ?)",
+                        [davRelPath, reversePath(davRelPath), isDir ? 1 : 0]);
+                }
+
+                function doPathDelete(davRelPath) {
+                    _sql.exec("DELETE FROM paths WHERE path = ?", [davRelPath]);
+                }
+
+                function doPathDeleteDir(davRelPath) {
+                    var prefix = davRelPath.replace(/\/?$/, '/');
+                    _sql.exec("DELETE FROM paths WHERE path = ?", [davRelPath]);
+                    _sql.exec("DELETE FROM paths WHERE path MATCHES ?", [prefix + '%']);
+                }
+
+                function doPathMove(oldPath, newPath) {
+                    _sql.exec("DELETE FROM paths WHERE path = ?", [oldPath]);
+                    // Check if it's a dir
+                    var existing = _sql.one("SELECT isdir FROM paths WHERE path = ?", [oldPath]);
+                    var isDir = existing ? existing.isdir : 0;
+                    // Just re-insert with new path (since pathrev also changes)
+                    _sql.exec("INSERT INTO paths VALUES (?, ?, ?)",
+                        [newPath, reversePath(newPath), isDir]);
+                }
+
+                function doPathMoveDir(oldPath, newPath) {
+                    var oldPrefix = oldPath.replace(/\/?$/, '/');
+                    var newPrefix = newPath.replace(/\/?$/, '/');
+                    // Move the directory entry itself
+                    _sql.exec("DELETE FROM paths WHERE path = ?", [oldPath]);
+                    _sql.exec("INSERT INTO paths VALUES (?, ?, ?)", [newPath, reversePath(newPath), 1]);
+                    // Move all children
+                    var rows = _sql.exec("SELECT path, isdir FROM paths WHERE path MATCHES ?", {maxRows: 100000}, [oldPrefix + '%']);
+                    if (rows.rows) {
+                        for (var i = 0; i < rows.rows.length; i++) {
+                            var op = rows.rows[i].path;
+                            var np = newPrefix + op.substring(oldPrefix.length);
+                            _sql.exec("DELETE FROM paths WHERE path = ?", [op]);
+                            _sql.exec("INSERT INTO paths VALUES (?, ?, ?)",
+                                [np, reversePath(np), rows.rows[i].isdir]);
+                        }
+                    }
+                }
+
+                function doPathScan(fsBase, davRelBase) {
+                    var entries;
+                    try { entries = u.readdir(fsBase, true); } catch(e) {
+                        log("path_scan readdir error for " + davRelBase + ": " + e.message);
+                        return;
+                    }
+                    for (var i = 0; i < entries.length; i++) {
+                        var ename = entries[i];
+                        if (ename === '.' || ename === '..') continue;
+                        if (skipName(ename)) continue;
+                        var childFs = fsBase + '/' + ename;
+                        var childDav = davRelBase.replace(/\/?$/, '/') + ename;
+                        // Use lstat to detect symlinks — don't follow symlink directories
+                        var childLst = u.lstat(childFs);
+                        if (!childLst) continue;
+                        doPathIndex(childDav, childLst.isDirectory);
+                        if (childLst.isDirectory && !childLst.isSymbolicLink) {
+                            if (isMountPoint(childFs)) continue;
+                            doPathScan(childFs, childDav);
+                        }
+                    }
+                }
+
+                log("Index service started");
+
+                // Initial scans — only on first-time table creation
+                if (docsCreated) {
+                    log("First run: scanning indexed directories for document content");
+                    var _searchDirs = _db.get(_searchDbi, "", 10000);
+                    if (_searchDirs) {
+                        var _sdKeys = Object.keys(_searchDirs);
+                        for (var _sdi = 0; _sdi < _sdKeys.length; _sdi++) {
+                            if (_searchDirs[_sdKeys[_sdi]] && _searchDirs[_sdKeys[_sdi]].enabled) {
+                                var _sdFs = cfg.davRoot + _sdKeys[_sdi];
+                                if (u.stat(_sdFs)) {
+                                    log("Scanning docs: " + _sdKeys[_sdi]);
+                                    doScan(_sdFs, _sdKeys[_sdi]);
+                                }
+                            }
+                        }
+                    }
+                    try { _sql.exec("ALTER INDEX docs_content_ftx OPTIMIZE HAVING COUNT(NewRows) > 0"); } catch(e) {}
+                    log("Document content scan complete");
+                }
+                if (pathsCreated) {
+                    log("First run: scanning all paths");
+                    doPathScan(cfg.davRoot, '');
+                    try { _sql.exec("ALTER INDEX paths_path_ftx OPTIMIZE HAVING COUNT(NewRows) > 0"); } catch(e) {}
+                    log("Path scan complete");
+                }
+
+                // Main loop: process tasks from queue
+                while (true) {
+                    var tasks = _db.get(_queueDbi, "", 100);
+                    var processed = 0;
+
+                    if (tasks && typeof tasks === 'object') {
+                        var keys = Object.keys(tasks).sort(); // ASCII sort = time order
+                        for (var ki = 0; ki < keys.length; ki++) {
+                            var task = tasks[keys[ki]];
+                            try {
+                                switch (task.op) {
+                                    case 'index':
+                                        doIndex(task.fsPath, task.davRelPath);
+                                        break;
+                                    case 'delete':
+                                        doDelete(task.davRelPath);
+                                        break;
+                                    case 'deletedir':
+                                        doDeleteDir(task.davRelPath);
+                                        break;
+                                    case 'move':
+                                        doMove(task.oldPath, task.newPath);
+                                        break;
+                                    case 'movedir':
+                                        doMoveDir(task.oldPath, task.newPath);
+                                        break;
+                                    case 'scan':
+                                        doScan(task.fsPath, task.davRelPath);
+                                        break;
+                                    case 'path_index':
+                                        doPathIndex(task.davRelPath, task.isDir);
+                                        break;
+                                    case 'path_delete':
+                                        doPathDelete(task.davRelPath);
+                                        break;
+                                    case 'path_deletedir':
+                                        doPathDeleteDir(task.davRelPath);
+                                        break;
+                                    case 'path_move':
+                                        doPathMove(task.oldPath, task.newPath);
+                                        break;
+                                    case 'path_movedir':
+                                        doPathMoveDir(task.oldPath, task.newPath);
+                                        break;
+                                    case 'path_scan':
+                                        doPathScan(task.fsPath, task.davRelPath);
+                                        break;
+                                    default:
+                                        log("unknown task op: " + task.op);
+                                }
+                            } catch(e) {
+                                log("task error (" + task.op + " " + (task.davRelPath || task.oldPath || '') + "): " + e.message);
+                            }
+                            // Delete completed task
+                            _db.del(_queueDbi, keys[ki]);
+                            processed++;
+                        }
+                    }
+
+                    // Sleep if no tasks were processed
+                    if (processed === 0) {
+                        u.sleep(2);
+                    }
+                }
+            },
+            // --- Thread argument ---
+            {
+                dbPath: DB_PATH,
+                searchDbPath: SEARCH_DB_PATH,
+                logFile: SEARCH_LOG,
+                davRoot: DAV_ROOT
+            },
+            // --- Callback: runs in the calling thread's event loop on error ---
+            function(value, error) {
+                if (error) {
+                    fprintf(stderr, "Index service crashed: %s\n", error.message || error);
+                    try {
+                        fprintf(SEARCH_LOG, true, "%s Index service crashed: %s\n",
+                            new Date().toISOString(), error.message || error);
+                    } catch(e) {}
+                    rampart.thread.put('indexServiceStarted', false);
+                    // Touch webdav.js to trigger module reload on next request
+                    try {
+                        touch(serverConf.appsRoot + '/webdav/webdav.js');
+                    } catch(e) {}
+                }
+            }
+        );
+
+        rampart.thread.put('indexServiceStarted', true);
+        indexLock.unlock();
+    } catch(e) {
+        indexLock.unlock();
+        fprintf(stderr, "Failed to start index service: %s\n", e.message || e);
+    }
+})();
+
+// --- Search query (runs in server threads, reads from Texis DB) ---
+
+// Open a read connection for queries (separate from the indexing thread's connection)
+// Don't create — the indexing thread handles DB creation
+var searchSql = stat(SEARCH_DB_PATH) ? new Sql.connection(SEARCH_DB_PATH) : null;
+
+function searchQuery(query, username, isAdmin, maxRows, skipRows, subPath) {
+    if (!query || !query.trim()) return {results: [], total: 0};
+    maxRows = maxRows || 20;
+    skipRows = skipRows || 0;
+    var pathFilter = subPath ? subPath.replace(/\/?$/, '/') : null;
+
+    // Connect lazily if the DB has been created by the indexing thread
+    if (!searchSql && stat(SEARCH_DB_PATH)) {
+        try { searchSql = new Sql.connection(SEARCH_DB_PATH); } catch(e) {}
+    }
+    if (!searchSql) return {results: [], total: 0};
+
+    // Check that the docs table exists
+    if (!searchSql.one("SELECT * FROM SYSTABLES WHERE NAME = ?", ['docs'])) {
+        return {results: [], total: 0};
+    }
+
+    // If searching a specific directory, verify access once upfront
+    if (pathFilter && !userCanSeePath(username, isAdmin, pathFilter)) {
+        return {results: [], total: 0};
+    }
+
+    searchSql.set({
+        suffixproc: true,
+        minwordlen: 5,
+        likepRows: 1000
+    });
+
+    try {
+        // Build query: add path filter in SQL if searching a specific directory
+        var sql, params;
+        if (pathFilter) {
+            sql = "SELECT path, title, " +
+                "  stringformat('%mbH', ?q, abstract(content, 0, 'querymultiple', ?q)) AS snippet " +
+                "FROM docs WHERE content LIKEP ?q AND path MATCHES ?dir";
+            params = {q: query, dir: pathFilter + '%'};
+        } else {
+            sql = "SELECT path, title, " +
+                "  stringformat('%mbH', ?q, abstract(content, 0, 'querymultiple', ?q)) AS snippet " +
+                "FROM docs WHERE content LIKEP ?q";
+            params = {q: query};
+        }
+
+        var res = searchSql.exec(sql,
+            {maxRows: 1000, skipRows: skipRows, includeCounts: true},
+            params
+        );
+
+        var results = [];
+        if (res.rows) {
+            // If searching a specific directory, we already checked access once above
+            // For unfiltered search, check each result's visibility
+            var needsAccessCheck = !pathFilter;
+            for (var ri = 0; ri < res.rows.length; ri++) {
+                var row = res.rows[ri];
+                if (needsAccessCheck && !userCanSeePath(username, isAdmin, row.path)) continue;
+                results.push({
+                    path: row.path,
+                    title: row.title,
+                    snippet: row.snippet || '',
+                    href: DAV_PREFIX + row.path
+                });
+            }
+        }
+
+        // If we filtered out rows (access check), use filtered count
+        // If we hit the 1000 row limit, report -1 meaning "many"
+        var total;
+        if (results.length < res.rows.length) {
+            // Some rows filtered out — use the filtered count
+            total = results.length;
+        } else if (res.rows.length >= 1000) {
+            total = -1; // "many"
+        } else {
+            total = results.length;
+        }
+
+        return {
+            results: results.slice(0, maxRows),
+            total: total
+        };
+    } catch(e) {
+        return {results: [], total: 0};
+    }
+}
+
+// Get list of indexed directories a user can search
+function searchGetUserDirs(username, isAdmin) {
+    var allDirs = searchGetIndexedDirs();
+    var dirs = [];
+    for (var i = 0; i < allDirs.length; i++) {
+        if (userCanSeePath(username, isAdmin, allDirs[i])) dirs.push(allDirs[i]);
+    }
+    return dirs;
+}
+
+// --- Filename search ---
+
+function filenameSearch(query, username, isAdmin, maxRows, skipRows, subPath) {
+    if (!query || !query.trim()) return {results: [], total: 0};
+    maxRows = maxRows || 20;
+    skipRows = skipRows || 0;
+    var pathFilter = subPath ? subPath.replace(/\/?$/, '/') : null;
+
+    if (!searchSql && stat(SEARCH_DB_PATH)) {
+        try { searchSql = new Sql.connection(SEARCH_DB_PATH); } catch(e) {}
+    }
+    if (!searchSql) return {results: [], total: 0};
+    if (!searchSql.one("SELECT * FROM SYSTABLES WHERE NAME = ?", ['paths'])) {
+        return {results: [], total: 0};
+    }
+
+    // Check directory access upfront if path-filtered
+    if (pathFilter && !userCanSeePath(username, isAdmin, pathFilter)) {
+        return {results: [], total: 0};
+    }
+
+    query = query.trim();
+    var sql, params;
+
+    if (query.indexOf('*.') === 0) {
+        // Extension search: *.jpg -> reverse search on pathrev
+        var ext = query.substring(2); // "jpg"
+        var revExt = ext.split('').reverse().join('') + '.'; // "gpj."
+        if (pathFilter) {
+            var revFilter = pathFilter.split('').reverse().join('');
+            sql = "SELECT path, isdir FROM paths WHERE pathrev MATCHES ?rev AND path MATCHES ?dir";
+            params = {rev: revExt + '%', dir: pathFilter + '%'};
+        } else {
+            sql = "SELECT path, isdir FROM paths WHERE pathrev MATCHES ?rev";
+            params = {rev: revExt + '%'};
+        }
+        var res = searchSql.exec(sql, {maxRows: 1000, skipRows: skipRows}, params);
+        var results = [];
+        if (res.rows) {
+            for (var i = 0; i < res.rows.length; i++) {
+                var row = res.rows[i];
+                if (!pathFilter && !userCanSeePath(username, isAdmin, row.path)) continue;
+                results.push({path: row.path, isDir: !!row.isdir, href: DAV_PREFIX + row.path});
+            }
+        }
+        var ftotal = results.length < res.rows.length ? results.length : (res.rows.length >= 1000 ? -1 : results.length);
+        return {results: results.slice(0, maxRows), total: ftotal};
+
+    } else if (query.indexOf('/') === 0) {
+        // Exact path prefix search: /path/to/file* -> matches on path
+        var pathQuery = query.replace(/\*$/, '') + '%';
+        sql = "SELECT path, isdir FROM paths WHERE path MATCHES ?p";
+        params = {p: pathQuery};
+        var res = searchSql.exec(sql, {maxRows: 1000, skipRows: skipRows}, params);
+        var results = [];
+        if (res.rows) {
+            for (var i = 0; i < res.rows.length; i++) {
+                var row = res.rows[i];
+                if (!userCanSeePath(username, isAdmin, row.path)) continue;
+                results.push({path: row.path, isDir: !!row.isdir, href: DAV_PREFIX + row.path});
+            }
+        }
+        var ftotal = results.length < res.rows.length ? results.length : (res.rows.length >= 1000 ? -1 : results.length);
+        return {results: results.slice(0, maxRows), total: ftotal};
+
+    } else {
+        // Fulltext search on path: filename or partial path
+        searchSql.set({suffixproc: false, likepRows: 1000});
+        if (pathFilter) {
+            sql = "SELECT path, isdir FROM paths WHERE path LIKEP ?q AND path MATCHES ?dir";
+            params = {q: query, dir: pathFilter + '%'};
+        } else {
+            sql = "SELECT path, isdir FROM paths WHERE path LIKEP ?q";
+            params = {q: query};
+        }
+        var res = searchSql.exec(sql, {maxRows: 1000, skipRows: skipRows, includeCounts: true}, params);
+        var results = [];
+        if (res.rows) {
+            for (var i = 0; i < res.rows.length; i++) {
+                var row = res.rows[i];
+                if (!pathFilter && !userCanSeePath(username, isAdmin, row.path)) continue;
+                results.push({path: row.path, isDir: !!row.isdir, href: DAV_PREFIX + row.path});
+            }
+        }
+        var ftotal = results.length < res.rows.length ? results.length : (res.rows.length >= 1000 ? -1 : results.length);
+        return {results: results.slice(0, maxRows), total: ftotal};
+    }
+}
 
 /* ============================================================
  * Section 2: Utility Functions
  * ============================================================ */
+
+// Check if a user can see a path based on top-level directory visibility.
+// Users can see their own home directory and non-user directories (shared, etc.).
+// Admins can see everything.
+function userCanSeePath(username, isAdmin, davRelPath) {
+    if (isAdmin) return true;
+    var parts = davRelPath.replace(/^\/+/, '').split('/');
+    if (parts.length < 1) return false;
+    var topDir = parts[0];
+    if (topDir === username) return true;
+    // Non-user directory (not a username) is visible to all
+    if (!db.get(userDbi, topDir)) return true;
+    return false;
+}
+
+// Filter an array of objects with a 'path' key, returning only those
+// the user has permission to see. Works for search results, locate results, etc.
+function filterVisiblePaths(items, username, isAdmin) {
+    if (isAdmin) return items;
+    var result = [];
+    for (var i = 0; i < items.length; i++) {
+        if (userCanSeePath(username, isAdmin, items[i].path)) result.push(items[i]);
+    }
+    return result;
+}
 
 function generateUUID() {
     var bytes = crypto.rand(16);
@@ -994,9 +1806,14 @@ function getMimeType(fsPath, davRelPath) {
         if (meta && meta.mimeType) return meta.mimeType;
     }
 
-    // 3. Detect via `file --mime-type` and store in file metadata
+    // 3. Detect via `file --mime-type` — skip for remote/FUSE mounts (too slow)
+    var fsStat = stat(fsPath);
+    if (fsStat && fsStat.dev !== DAV_ROOT_DEV) {
+        return 'application/octet-stream';
+    }
+
     var detected = 'application/octet-stream';
-    if (stat(fsPath)) {
+    if (fsStat) {
         try {
             var res = shell("file --mime-type -b " + _shellEscape(fsPath), {timeout: 3000});
             var out = trim(res.stdout);
@@ -2124,6 +2941,7 @@ function handlePUT(req, davRelPath, fsPath) {
         createFileMeta(davRelPath, req.davUser.username, false);
     }
     generateThumbnail(fsPath, davRelPath);
+    searchIndexFile(fsPath, davRelPath);
 
     var st = stat(fsPath);
     return {
@@ -2197,6 +3015,7 @@ function handleChunkedPUT(req, davRelPath, fsPath, uploadId) {
             createFileMeta(davRelPath, req.davUser.username, false);
         }
         generateThumbnail(fsPath, davRelPath);
+        searchIndexFile(fsPath, davRelPath);
         var st = stat(fsPath);
         return {
             status: existed ? 204 : 201,
@@ -2227,17 +3046,20 @@ function handleDELETE(req, davRelPath, fsPath) {
             rmFile(fsPath);
             deleteFileMeta(davRelPath);
             removeDeadProps(davRelPath);
+            searchDeleteFile(davRelPath);
         } else if (lst.isDirectory) {
             // Clean up metadata before deleting (needs to read directory)
             deleteFileMetaRecursive(davRelPath, fsPath);
             deleteThumbnailsRecursive(davRelPath);
             removeDeadPropsRecursive(davRelPath);
+            searchDeleteDir(davRelPath);
             rmdirRecursive(fsPath);
         } else {
             rmFile(fsPath);
             deleteFileMeta(davRelPath);
             deleteThumbnail(davRelPath);
             removeDeadProps(davRelPath);
+            searchDeleteFile(davRelPath);
         }
     } catch(e) {
         return { status: 403, txt: 'Delete failed: ' + (e.message || 'Operation not permitted') };
@@ -2262,6 +3084,7 @@ function handleMKCOL(req, davRelPath, fsPath) {
         return { status: 500, txt: 'Failed to create collection: ' + e.message };
     }
     createFileMeta(davRelPath, req.davUser.username, true);
+    pathIndexFile(davRelPath, true);
     return { status: 201, txt: '' };
 }
 
@@ -2351,6 +3174,14 @@ function handleCOPY(req, davRelPath, fsPath) {
         saveDeadProps(destDavRel, srcProps);
     }
 
+    // Update search index for copy
+    if (st.isDirectory) {
+        // Re-scan the destination directory to index copied files
+        searchScanDir(destFsPath, destDavRel);
+    } else {
+        searchIndexFile(destFsPath, destDavRel);
+    }
+
     return { status: destExists ? 204 : 201, txt: '' };
 }
 
@@ -2418,15 +3249,18 @@ function handleMOVE(req, davRelPath, fsPath) {
             rmFile(fsPath);
             moveDeadProps(davRelPath, destDavRel);
             moveFileMeta(davRelPath, destDavRel);
+            searchMovePath(davRelPath, destDavRel);
         } else {
             rename(fsPath, destFsPath);
             moveDeadProps(davRelPath, destDavRel);
             if (st.isDirectory) {
                 moveFileMetaRecursive(davRelPath, destDavRel, destFsPath);
                 moveThumbnailsRecursive(davRelPath, destDavRel);
+                searchMoveDir(davRelPath, destDavRel);
             } else {
                 moveFileMeta(davRelPath, destDavRel);
                 moveThumbnail(davRelPath, destDavRel);
+                searchMovePath(davRelPath, destDavRel);
             }
         }
     } catch(e) {
@@ -2848,6 +3682,224 @@ function main_dispatch(req) {
 
     // Extract DAV-relative path from the full request path
     var fullPath = req.path.path || '/';
+
+    // Status endpoint: GET /dav/_status — check if any users/admins exist
+    if (method === 'GET' && fullPath === DAV_PREFIX + '/_status') {
+        var allUsers = db.get(userDbi, "", 10000);
+        var hasUsers = allUsers && typeof allUsers === 'object' && Object.keys(allUsers).length > 0;
+        var hasAdmin = false;
+        if (hasUsers) {
+            var ukeys = Object.keys(allUsers);
+            for (var ui = 0; ui < ukeys.length; ui++) {
+                if (allUsers[ukeys[ui]].admin) { hasAdmin = true; break; }
+            }
+        }
+        return { status: 200, json: {ok: true, hasUsers: hasUsers, hasAdmin: hasAdmin} };
+    }
+
+    // Search endpoint: POST /dav/_search with JSON {query, maxRows, skipRows}
+    if (method === 'POST' && fullPath === DAV_PREFIX + '/_search') {
+        var srchUser = authenticate(req);
+        if (!srchUser) return { status: 401, json: {ok: false, error: 'Not authenticated'} };
+        var srchBody;
+        try { srchBody = JSON.parse(bufferToString(req.body)); } catch(e) {
+            return { status: 400, json: {ok: false, error: 'Invalid JSON'} };
+        }
+        if (!srchBody.query) return { status: 400, json: {ok: false, error: 'Missing query'} };
+        var srchSubPath = srchBody.subPath || null;
+        var srchResult = searchQuery(srchBody.query, srchUser.username, srchUser.admin, srchBody.maxRows, srchBody.skipRows, srchSubPath);
+        return _attachCookie({ status: 200, json: {ok: true, query: srchBody.query, results: srchResult.results, total: srchResult.total} }, srchUser);
+    }
+
+    // Autocomplete suggestions: GET /dav/_search/suggest?q=term&mode=path|word&max=10
+    if (method === 'GET' && fullPath === DAV_PREFIX + '/_search/suggest') {
+        var sugUser = authenticate(req);
+        if (!sugUser) return { status: 401, json: {ok: false, error: 'Not authenticated'} };
+        var sugQuery = req.query || req.path.search || {};
+        var sugQ = sugQuery.q || '';
+        var sugMode = sugQuery.mode || 'path';
+        var sugMax = parseInt(sugQuery.max) || 10;
+        var sugSubPath = sugQuery.subPath ? decodeURIComponent(sugQuery.subPath).replace(/\/?$/, '/') : null;
+        if (sugQ.length < 2) return _attachCookie({ status: 200, json: {ok: true, suggestions: []} }, sugUser);
+
+        if (!searchSql && stat(SEARCH_DB_PATH)) {
+            try { searchSql = new Sql.connection(SEARCH_DB_PATH); } catch(e) {}
+        }
+        if (!searchSql) return _attachCookie({ status: 200, json: {ok: true, suggestions: []} }, sugUser);
+
+        var sugResults = [];
+
+        if (sugMode === 'word') {
+            // Word suggestions from fulltext index
+            if (searchSql.one("SELECT * FROM SYSTABLES WHERE NAME = ?", ['docs'])) {
+                try {
+                    searchSql.set({indexaccess: true});
+                    // Get the last word being typed for autocomplete
+                    var sugWords = sugQ.trim().split(/\s+/);
+                    var sugLastWord = sugWords[sugWords.length - 1];
+                    if (sugLastWord.length >= 2) {
+                        var sugRes = searchSql.exec(
+                            "SELECT Word FROM docs_content_ftx WHERE Word MATCHES ?w ORDER BY Count DESC",
+                            {maxRows: sugMax},
+                            {w: sugLastWord + '%'}
+                        );
+                        if (sugRes.rows) {
+                            for (var si = 0; si < sugRes.rows.length; si++) {
+                                // Build the full suggestion: prefix words + completed word
+                                var prefix = sugWords.length > 1 ? sugWords.slice(0, -1).join(' ') + ' ' : '';
+                                var fullValue = prefix + sugRes.rows[si].Word;
+                                sugResults.push({
+                                    label: fullValue,
+                                    value: fullValue
+                                });
+                            }
+                        }
+                    }
+                    searchSql.set({indexaccess: false});
+                } catch(e) {
+                    try { searchSql.set({indexaccess: false}); } catch(e2) {}
+                }
+            }
+        } else if (sugMode === 'pathword') {
+            // Fulltext path suggestions — for filename search without leading /
+            if (searchSql.one("SELECT * FROM SYSTABLES WHERE NAME = ?", ['paths'])) {
+                try {
+                    searchSql.set({suffixproc: false, likepRows: 100});
+                    var sugSql, sugParams;
+                    if (sugSubPath) {
+                        sugSql = "SELECT path, isdir FROM paths WHERE path LIKEP ?q AND path MATCHES ?dir";
+                        sugParams = {q: sugQ, dir: sugSubPath + '%'};
+                    } else {
+                        sugSql = "SELECT path, isdir FROM paths WHERE path LIKEP ?q";
+                        sugParams = {q: sugQ};
+                    }
+                    var sugRes = searchSql.exec(sugSql, {maxRows: sugMax * 3}, sugParams);
+                    if (sugRes.rows) {
+                        for (var si = 0; si < sugRes.rows.length; si++) {
+                            if (!sugSubPath && !userCanSeePath(sugUser.username, sugUser.admin, sugRes.rows[si].path)) continue;
+                            sugResults.push({path: sugRes.rows[si].path, isDir: !!sugRes.rows[si].isdir});
+                            if (sugResults.length >= sugMax) break;
+                        }
+                    }
+                } catch(e) {}
+            }
+        } else {
+            // Path prefix suggestions (starts with /)
+            if (searchSql.one("SELECT * FROM SYSTABLES WHERE NAME = ?", ['paths'])) {
+                try {
+                    var sugPrefix = sugQ;
+                    // If subPath filter and query doesn't already include it, prepend it
+                    if (sugSubPath && sugQ.indexOf(sugSubPath) !== 0) {
+                        sugPrefix = sugSubPath + sugQ.substring(1); // replace leading / with subPath
+                    }
+                    var sugRes = searchSql.exec(
+                        "SELECT path, isdir FROM paths WHERE path MATCHES ?p ORDER BY length(path)",
+                        {maxRows: sugMax * 3},
+                        {p: sugPrefix + '%'}
+                    );
+                    if (sugRes.rows) {
+                        for (var si = 0; si < sugRes.rows.length; si++) {
+                            if (!userCanSeePath(sugUser.username, sugUser.admin, sugRes.rows[si].path)) continue;
+                            sugResults.push({path: sugRes.rows[si].path, isDir: !!sugRes.rows[si].isdir});
+                            if (sugResults.length >= sugMax) break;
+                        }
+                    }
+                } catch(e) {}
+            }
+        }
+
+        return _attachCookie({ status: 200, json: {ok: true, suggestions: sugResults} }, sugUser);
+    }
+
+    // Filename search endpoint: POST /dav/_search/files with JSON {query, subPath, maxRows, skipRows}
+    if (method === 'POST' && fullPath === DAV_PREFIX + '/_search/files') {
+        var fnUser = authenticate(req);
+        if (!fnUser) return { status: 401, json: {ok: false, error: 'Not authenticated'} };
+        var fnBody;
+        try { fnBody = JSON.parse(bufferToString(req.body)); } catch(e) {
+            return { status: 400, json: {ok: false, error: 'Invalid JSON'} };
+        }
+        if (!fnBody.query) return { status: 400, json: {ok: false, error: 'Missing query'} };
+        var fnSubPath = fnBody.subPath || null;
+        var fnResult = filenameSearch(fnBody.query, fnUser.username, fnUser.admin, fnBody.maxRows, fnBody.skipRows, fnSubPath);
+        return _attachCookie({ status: 200, json: {ok: true, query: fnBody.query, results: fnResult.results, total: fnResult.total} }, fnUser);
+    }
+
+    // Reindex endpoint: POST /dav/_search/reindex with JSON {path} (admin only)
+    if (method === 'POST' && fullPath === DAV_PREFIX + '/_search/reindex') {
+        var riUser = authenticate(req);
+        if (!riUser) return { status: 401, json: {ok: false, error: 'Not authenticated'} };
+        if (!riUser.admin) return { status: 403, json: {ok: false, error: 'Admin only'} };
+        var riBody;
+        try { riBody = JSON.parse(bufferToString(req.body)); } catch(e) {
+            return { status: 400, json: {ok: false, error: 'Invalid JSON'} };
+        }
+        var riDavPath = riBody.path || ('/' + riUser.username + '/' + SEARCH_DEFAULT_DIR);
+        var riFsPath = DAV_ROOT + riDavPath;
+        if (!stat(riFsPath)) return { status: 404, json: {ok: false, error: 'Directory not found'} };
+        var riTable = searchTableName(riDavPath);
+        searchScanDir(riFsPath, riDavPath, riTable);
+        return _attachCookie({ status: 200, json: {ok: true, message: 'Reindex started for ' + riDavPath} }, riUser);
+    }
+
+    // Search index status: GET /dav/_search/status?path=/aaron/somedir
+    // Returns whether this dir is indexed, has an indexed parent, or indexed children
+    if (method === 'GET' && fullPath === DAV_PREFIX + '/_search/status') {
+        var siUser = authenticate(req);
+        if (!siUser) return { status: 401, json: {ok: false, error: 'Not authenticated'} };
+        var siQuery = req.query || req.path.search || {};
+        var siPath = siQuery.path;
+        if (!siPath) return { status: 400, json: {ok: false, error: 'Missing path'} };
+        siPath = decodeURIComponent(siPath);
+        var siFsPath = DAV_ROOT + siPath;
+        var siIsMounted = _isMounted(siFsPath);
+        if (siIsMounted && !allowMountedSearch) {
+            return _attachCookie({ status: 200, json: {ok: true, indexed: false, parentIndexed: false, mountBlocked: true} }, siUser);
+        }
+        var siIndexed = !!db.get(searchDbi, siPath);
+        var siParent = searchGetIndexedParent(siPath);
+        return _attachCookie({ status: 200, json: {
+            ok: true,
+            indexed: siIndexed,
+            parentIndexed: siParent || false
+        }}, siUser);
+    }
+
+    // Toggle search indexing: POST /dav/_search/toggle with JSON {path, enable}
+    if (method === 'POST' && fullPath === DAV_PREFIX + '/_search/toggle') {
+        var stUser = authenticate(req);
+        if (!stUser) return { status: 401, json: {ok: false, error: 'Not authenticated'} };
+        var stBody;
+        try { stBody = JSON.parse(bufferToString(req.body)); } catch(e) {
+            return { status: 400, json: {ok: false, error: 'Invalid JSON'} };
+        }
+        var stPath = stBody.path;
+        if (!stPath) return { status: 400, json: {ok: false, error: 'Missing path'} };
+        // Verify user owns this directory or is admin
+        if (!stUser.admin && stPath.indexOf('/' + stUser.username + '/') !== 0) {
+            return { status: 403, json: {ok: false, error: 'Permission denied'} };
+        }
+        var stFsPath = DAV_ROOT + stPath;
+        if (!stat(stFsPath) || !stat(stFsPath).isDirectory) {
+            return { status: 404, json: {ok: false, error: 'Directory not found'} };
+        }
+        // Block mounted directories unless allowed
+        if (_isMounted(stFsPath) && !allowMountedSearch) {
+            return { status: 403, json: {ok: false, error: 'Search indexing of mounted directories is disabled'} };
+        }
+        // Can't toggle if a parent is indexed
+        var stParent = searchGetIndexedParent(stPath);
+        if (stParent) {
+            return { status: 400, json: {ok: false, error: 'Parent directory "' + stParent + '" is already indexed'} };
+        }
+        if (stBody.enable) {
+            searchEnableDir(stPath);
+            return _attachCookie({ status: 200, json: {ok: true, message: 'Indexing enabled for ' + stPath} }, stUser);
+        } else {
+            searchDisableDir(stPath);
+            return _attachCookie({ status: 200, json: {ok: true, message: 'Indexing disabled for ' + stPath} }, stUser);
+        }
+    }
 
     // Login endpoint: POST /dav/_login with JSON {username, password}
     if (method === 'POST' && fullPath === DAV_PREFIX + '/_login') {
@@ -3609,12 +4661,14 @@ function main_dispatch(req) {
         var ooProto = getHeader(req.headers, 'X-Forwarded-Proto');
         var ooHost = getHeader(req.headers, 'X-Forwarded-Host') || req.path.host;
         var ooOrigin = (ooProto ? ooProto + '://' : req.path.scheme) + ooHost;
-        // For ONLYOFFICE callback/fetch URLs: always use
-        // host.docker.internal since ONLYOFFICE runs in
-        // Docker on the same machine as Rampart
+        // For ONLYOFFICE callback/fetch URLs: use the appropriate internal hostname
+        // Docker compose mode: both containers on same network, use service name
+        // Standalone mode: ONLYOFFICE in Docker reaches host via host.docker.internal
         var ooRampartPort = (global.serverConf && global.serverConf.port > 0) ? global.serverConf.port : 8088;
         var ooDockerScheme = (global.serverConf && global.serverConf.secure) ? 'https://' : 'http://';
-        var ooDockerOrigin = ooDockerScheme + 'host.docker.internal:' + ooRampartPort;
+        var ooDockerOrigin = global.OO_DOCKER_MODE
+            ? 'http://rampart:' + ooRampartPort
+            : ooDockerScheme + 'host.docker.internal:' + ooRampartPort;
         var ooFetchUrl = ooDockerOrigin + '/dav/_office/fetch?file='
             + encodeURIComponent(ooFileParam)
             + '&token=' + encodeURIComponent(_ooSignFetchToken(ooDavRel, ooNow));
@@ -3792,6 +4846,9 @@ function main_dispatch(req) {
                 var ocThumbPath = THUMB_DIR + '/' + ocDavRel.replace(/\.[^.]+$/, '.jpg');
                 try { rmFile(ocThumbPath); } catch(e) {}
 
+                // Update search index
+                searchIndexFile(ocFsPath, ocDavRel);
+
             } catch(e) {
                 fprintf(stderr, "ONLYOFFICE callback: error saving %s: %s\n", ocDavRel, e.message || e);
                 return { status: 500, json: {error: 1} };
@@ -3844,7 +4901,26 @@ function main_dispatch(req) {
                 ooAutosave: settingsRecord && typeof settingsRecord.ooAutosave === 'boolean' ? settingsRecord.ooAutosave : true,
                 sshHosts: (settingsRecord && settingsRecord.sshHosts) || [],
                 demoMode: DEMO_MODE,
-                demoClearTime: DEMO_MODE ? DEMO_CLEAR_TIME : 0
+                demoClearTime: DEMO_MODE ? DEMO_CLEAR_TIME : 0,
+                searchDirs: searchGetUserDirs(settingsUser.username, settingsUser.admin),
+                themes: (function() {
+                    var themesDir = (serverConf.htmlRoot || (process.scriptPath + '/html')) + '/filemanager/css/themes';
+                    var themes = [];
+                    try {
+                        var files = readdir(themesDir);
+                        if (files) {
+                            for (var ti = 0; ti < files.length; ti++) {
+                                if (files[ti].match(/\.css$/i)) {
+                                    var name = files[ti].replace(/\.css$/i, '');
+                                    var label = name.replace(/[-_]/g, ' ').replace(/\b\w/g, function(c) { return c.toUpperCase(); });
+                                    themes.push({value: name, label: label});
+                                }
+                            }
+                            themes.sort(function(a, b) { return a.label < b.label ? -1 : 1; });
+                        }
+                    } catch(e) {}
+                    return themes;
+                })()
         };
         return { status: 200, json: settingsJson };
     }
@@ -5273,7 +6349,7 @@ function main_dispatch(req) {
             ' 2> ' + _shellEscape(oaStderr);
         _oaThr.exec(function(cfg) {
             var u = rampart.utils;
-            u.fprintf(cfg.log, true, "thread running: %s\n", cfg.cmd);
+            if (cfg.log) u.fprintf(cfg.log, true, "thread running: %s\n", cfg.cmd);
             u.shell(cfg.cmd, {timeout: 300000});
         }, {
             cmd: oaBgCmd

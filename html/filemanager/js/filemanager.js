@@ -18,6 +18,52 @@
 'use strict';
 
 /* -----------------------------------------------------------------------
+ * CDN URLs — set useLocalScripts=true in index.html to use local copies
+ * ----------------------------------------------------------------------- */
+const _L = '/filemanager/js/local/';
+const CDN = (typeof useLocalScripts !== 'undefined' && useLocalScripts) ? {
+  jsmediatags:       _L + 'jsmediatags.min.js',
+  videojsCss:        _L + 'video-js.min.css',
+  videojsJs:         _L + 'video.min.js',
+  pdfjsJs:           _L + 'pdf.min.js',
+  pdfjsWorker:       _L + 'pdf.worker.min.js',
+  filerobot:         _L + 'filerobot-image-editor.min.js',
+  joditCss:          _L + 'jodit.min.css',
+  joditJs:           _L + 'jodit.min.js',
+  jszip:             _L + 'jszip.min.js',
+  epubjs:            _L + 'epub.min.js',
+  marked:            _L + 'marked.min.js',
+  xtermCss:          _L + 'xterm.min.css',
+  xtermJs:           _L + 'xterm.min.js',
+  xtermFit:          _L + 'xterm-addon-fit.min.js',
+  cmBundle:          _L + 'codemirror-bundle.js',
+  beautifyJs:        _L + 'beautify.min.js',
+  beautifyHtmlJs:    _L + 'beautify-html.min.js',
+  aceJs:             _L + 'ace.js',
+  esm:               null,
+} : {
+  jsmediatags:       'https://cdn.jsdelivr.net/npm/jsmediatags@3.9.7/dist/jsmediatags.min.js',
+  videojsCss:        'https://cdn.jsdelivr.net/npm/video.js@8/dist/video-js.min.css',
+  videojsJs:         'https://cdn.jsdelivr.net/npm/video.js@8/dist/video.min.js',
+  pdfjsJs:           'https://cdn.jsdelivr.net/npm/pdfjs-dist@3/build/pdf.min.js',
+  pdfjsWorker:       'https://cdn.jsdelivr.net/npm/pdfjs-dist@3/build/pdf.worker.min.js',
+  filerobot:         'https://scaleflex.cloudimg.io/v7/plugins/filerobot-image-editor/latest/filerobot-image-editor.min.js',
+  joditCss:          'https://cdnjs.cloudflare.com/ajax/libs/jodit/4.6.13/es2018/jodit.min.css',
+  joditJs:           'https://cdnjs.cloudflare.com/ajax/libs/jodit/4.6.13/es2018/jodit.min.js',
+  jszip:             'https://cdn.jsdelivr.net/npm/jszip@3/dist/jszip.min.js',
+  epubjs:            'https://cdn.jsdelivr.net/npm/epubjs@0.3/dist/epub.min.js',
+  marked:            'https://cdn.jsdelivr.net/npm/marked@15/marked.min.js',
+  xtermCss:          'https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.min.css',
+  xtermJs:           'https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.min.js',
+  xtermFit:          'https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.min.js',
+  beautifyJs:        'https://cdnjs.cloudflare.com/ajax/libs/js-beautify/1.14.4/beautify.min.js',
+  beautifyHtmlJs:    'https://cdnjs.cloudflare.com/ajax/libs/js-beautify/1.14.4/beautify-html.min.js',
+  aceJs:             'https://cdnjs.cloudflare.com/ajax/libs/ace/1.4.2/ace.js',
+  cmBundle:          null,
+  esm:               'https://esm.sh/',
+};
+
+/* -----------------------------------------------------------------------
  * Section 1: DavClient — WebDAV HTTP wrapper
  * ----------------------------------------------------------------------- */
 
@@ -397,11 +443,14 @@ const Toast = {
   },
 
   show(message, type, duration) {
-    if (!duration) duration = 4000;
+    if (duration === undefined || duration === null) duration = 4000;
     const c = this._getContainer();
     const el = document.createElement('div');
     el.className = 'toast' + (type ? ' toast-' + type : '');
-    el.textContent = message;
+    var msgSpan = document.createElement('span');
+    msgSpan.className = 'toast-message';
+    msgSpan.textContent = message;
+    el.appendChild(msgSpan);
     if (duration < 0) {
       // Persistent — add close button
       var closeBtn = document.createElement('span');
@@ -413,20 +462,22 @@ const Toast = {
         setTimeout(function() { el.remove(); }, 300);
       });
       el.appendChild(closeBtn);
-    } else {
+    } else if (duration > 0) {
       setTimeout(() => {
         el.style.opacity = '0';
         el.style.transition = 'opacity 0.3s';
         setTimeout(() => el.remove(), 300);
       }, duration);
     }
+    // duration === 0: persistent, no close button (managed externally)
     c.appendChild(el);
+    return el;
   },
 
   error(msg) { this.show(msg, 'error', -1); },
   success(msg) { this.show(msg, 'success'); },
   warning(msg) { this.show(msg, 'warning', 5000); },
-  info(msg) { this.show(msg); }
+  info(msg, duration) { return this.show(msg, 'info', duration); }
 };
 
 
@@ -1939,6 +1990,10 @@ const Clipboard = {
     if (!this.hasItems()) return;
     const method = this.action === 'cut' ? 'MOVE' : 'COPY';
     let errors = 0;
+    const verb = method === 'MOVE' ? 'Moving' : 'Copying';
+    const total = this.items.length;
+    var progressToast = Toast.show(verb + ' ' + total + ' item(s)...', 'success', 0);
+    await new Promise(function(r) { setTimeout(r, 50); });
 
     const errorMsgs = [];
     const overwriteState = {value: null}; // null=ask, true=yesAll, false=noAll
@@ -1986,6 +2041,8 @@ const Clipboard = {
       }
     }
 
+    clearTimeout(pasteTimer);
+    if (progressToast) progressToast.remove();
     if (this.action === 'cut') this.clear();
     if (errorMsgs.length) Toast.error(errorMsgs.join('\n'));
     if (copied > 0) Toast.success((method === 'MOVE' ? 'Moved' : 'Copied') + ' ' + copied + ' item(s)');
@@ -2143,6 +2200,10 @@ const DragDrop = {
       const method = isSymlink ? 'LINK' : this._defaultOp(items, dirHref, e.shiftKey);
       const targetUrl = dirHref.replace(/\/?$/, '/');
 
+      const verb = isSymlink ? 'Linking' : (method === 'MOVE' ? 'Moving' : 'Copying');
+      var ddProgressToast = Toast.show(verb + ' ' + items.length + ' item(s)...', 'success', 0);
+      await new Promise(function(r) { setTimeout(r, 50); });
+
       const errorMsgs = [];
       const overwriteState = {value: null};
       let completed = 0;
@@ -2150,6 +2211,10 @@ const DragDrop = {
         const item = items[di];
         // Don't drop onto self
         if (item.href === targetUrl || item.href === targetUrl + item.name + '/') continue;
+        if (ddProgressToast) {
+          var ddPtEl = ddProgressToast.querySelector('.toast-message') || ddProgressToast;
+          ddPtEl.textContent = verb + ' ' + (di + 1) + '/' + items.length + ': ' + item.name;
+        }
 
         if (isSymlink) {
           const linkPath = targetUrl + encodeURIComponent(item.name);
@@ -2199,12 +2264,831 @@ const DragDrop = {
         }
       }
 
+      if (ddProgressToast) ddProgressToast.remove();
       const action = isSymlink ? 'Linked' : (method === 'MOVE' ? 'Moved' : 'Copied');
       if (errorMsgs.length) Toast.error(errorMsgs.join('\n'));
       if (completed > 0) Toast.success(action + ' ' + completed + ' item(s)');
       FileList.reload();
       Tree.refresh(FileList.currentPath);
       Tree.refresh(targetUrl);
+    });
+  }
+};
+
+
+/* -----------------------------------------------------------------------
+ * Section 5b2: Autocomplete — reusable dropdown suggestions
+ * ----------------------------------------------------------------------- */
+
+const Autocomplete = {
+  // Attach autocomplete to an input element
+  // options:
+  //   fetchSuggestions(query, callback) — async, calls callback([{label, value, ...}])
+  //   onSelect(item, input) — called when a suggestion is selected
+  //   minLength — minimum chars before triggering (default 2)
+  //   debounceMs — debounce delay (default 200)
+  //   shouldActivate(value) — optional, return false to skip autocomplete for this input value
+  attach(input, options) {
+    var opts = options || {};
+    var minLen = opts.minLength || 2;
+    var debounceMs = opts.debounceMs || 200;
+    var timer = null;
+    var activeIdx = -1;
+    var items = [];
+
+    // Create dropdown — appended to body with fixed positioning to avoid overflow clipping
+    var dropdown = document.createElement('div');
+    dropdown.className = 'ac-dropdown';
+    dropdown.hidden = true;
+    document.body.appendChild(dropdown);
+
+    function positionDropdown() {
+      var rect = input.getBoundingClientRect();
+      dropdown.style.left = rect.left + 'px';
+      dropdown.style.top = (rect.bottom + 2) + 'px';
+      dropdown.style.width = rect.width + 'px';
+    }
+
+    function show(suggestions) {
+      items = suggestions;
+      activeIdx = -1;
+      if (!items.length) { hide(); return; }
+      dropdown.innerHTML = '';
+      for (var i = 0; i < items.length; i++) {
+        var row = document.createElement('div');
+        row.className = 'ac-item';
+        row.textContent = items[i].label || items[i].path || items[i].value;
+        row.dataset.idx = i;
+        row.addEventListener('mousedown', function(e) {
+          e.preventDefault(); // prevent input blur
+          var idx = parseInt(this.dataset.idx);
+          select(idx);
+        });
+        dropdown.appendChild(row);
+      }
+      positionDropdown();
+      dropdown.hidden = false;
+    }
+
+    function hide() {
+      dropdown.hidden = true;
+      dropdown.innerHTML = '';
+      items = [];
+      activeIdx = -1;
+    }
+
+    function highlight(idx) {
+      var rows = dropdown.querySelectorAll('.ac-item');
+      for (var i = 0; i < rows.length; i++) {
+        rows[i].classList.toggle('ac-active', i === idx);
+      }
+      activeIdx = idx;
+      if (rows[idx]) rows[idx].scrollIntoView({block: 'nearest'});
+    }
+
+    function select(idx) {
+      if (idx >= 0 && idx < items.length) {
+        if (opts.onSelect) opts.onSelect(items[idx], input);
+        hide();
+      }
+    }
+
+    input.addEventListener('input', function() {
+      clearTimeout(timer);
+      var val = input.value;
+      if (opts.shouldActivate && !opts.shouldActivate(val)) { hide(); return; }
+      if (val.length < minLen) { hide(); return; }
+      timer = setTimeout(function() {
+        opts.fetchSuggestions(val, function(suggestions) {
+          show(suggestions);
+        });
+      }, debounceMs);
+    });
+
+    input.addEventListener('keydown', function(e) {
+      if (dropdown.hidden) return;
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        highlight(activeIdx < items.length - 1 ? activeIdx + 1 : -1);
+      } else if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        highlight(activeIdx > 0 ? activeIdx - 1 : activeIdx === 0 ? -1 : items.length - 1);
+      } else if (e.key === 'Enter' && activeIdx >= 0) {
+        e.preventDefault();
+        e.stopPropagation();
+        if (opts.onEnterHandled) opts.onEnterHandled();
+        select(activeIdx);
+      } else if (e.key === 'Escape') {
+        hide();
+      }
+    });
+
+    input.addEventListener('blur', function() {
+      // Small delay so click on dropdown item registers
+      setTimeout(hide, 150);
+    });
+
+    return { hide: hide, destroy: function() { dropdown.remove(); } };
+  }
+};
+
+
+/* -----------------------------------------------------------------------
+ * Section 5c: Search — Full-text document search
+ * ----------------------------------------------------------------------- */
+
+const Search = {
+  _winId: null,
+
+  // Check if the current path is inside an indexed directory
+  getSearchDir(currentPath) {
+    if (!Auth.searchDirs || !Auth.searchDirs.length) return null;
+    var davPrefix = App.davUrl.replace(/\/$/, '');
+    for (var i = 0; i < Auth.searchDirs.length; i++) {
+      var dir = Auth.searchDirs[i];
+      var fullDir = davPrefix + dir;
+      if (currentPath.indexOf(fullDir) === 0) return dir;
+    }
+    return null;
+  },
+
+  // Search button is always visible
+  updateButton() {
+    var btn = document.getElementById('search-btn');
+    btn.hidden = false;
+  },
+
+  // Check if current path is in an indexed directory (for toggle)
+  isInIndexedDir() {
+    return !!this.getSearchDir(FileList.currentPath);
+  },
+
+  _filenameMode: false,
+
+  _buildTitle(query) {
+    var prefix = this._filenameMode ? 'Files: ' : 'Search: ';
+    var scope = this._searchThisDir ? ' in ' + this._lastSubPath : ' in all folders';
+    return prefix + query + scope;
+  },
+
+  _updatePlaceholder() {
+    var input = document.getElementById('search-input');
+    if (this._filenameMode) {
+      input.placeholder = this._searchThisDir ? 'Search filenames in this folder' : 'Search all filenames';
+    } else {
+      input.placeholder = this._searchThisDir ? 'Search documents in this folder' : 'Search all documents';
+    }
+  },
+
+  _isNarrow() {
+    return window.matchMedia('(max-width: 480px)').matches;
+  },
+
+  // Show the search input, hide the breadcrumb and toolbar actions
+  showInput() {
+    document.getElementById('breadcrumb').hidden = true;
+    document.querySelector('.toolbar-actions').hidden = true;
+    if (this._isNarrow()) {
+      document.getElementById('nav-back').hidden = true;
+      document.getElementById('nav-forward').hidden = true;
+      document.getElementById('nav-refresh').hidden = true;
+      document.getElementById('search-btn').hidden = true;
+    }
+    var bar = document.getElementById('search-bar');
+    bar.hidden = false;
+    var input = document.getElementById('search-input');
+    input.value = '';
+    this._filenameMode = true;
+    this._updatePlaceholder();
+    if (this._updateModeBtn) this._updateModeBtn();
+    input.focus();
+  },
+
+  // Hide search input, restore breadcrumb and toolbar actions
+  hideInput() {
+    document.getElementById('search-bar').hidden = true;
+    document.getElementById('breadcrumb').hidden = false;
+    document.querySelector('.toolbar-actions').hidden = false;
+    if (this._isNarrow()) {
+      document.getElementById('nav-back').hidden = false;
+      document.getElementById('nav-forward').hidden = false;
+      document.getElementById('nav-refresh').hidden = false;
+      document.getElementById('search-btn').hidden = false;
+    }
+  },
+
+  // Get the current dav-relative path (without /dav prefix)
+  getCurrentDavPath() {
+    var davPrefix = App.davUrl.replace(/\/$/, '');
+    var path = FileList.currentPath;
+    if (path.indexOf(davPrefix) === 0) path = path.substring(davPrefix.length);
+    return path.replace(/\/$/, '');
+  },
+
+  _searchThisDir: true, // default: search current directory only
+
+  // Execute search and show results
+  async doSearch(query) {
+    if (!query.trim()) return;
+    var isFilenameMode = this._filenameMode;
+    this.hideInput();
+    var subPath = this._searchThisDir ? this.getCurrentDavPath() : null;
+    if (isFilenameMode) {
+      this._fetchAndShowFiles(query, subPath, 0);
+    } else {
+      this._fetchAndShow(query, subPath, 0);
+    }
+  },
+
+  _pageSize: 10,
+  _lastSubPath: null,
+
+  // Display search results in a WinManager window
+  showResults(query, results, total, skip) {
+    var self = this;
+    skip = skip || 0;
+    this._lastSubPath = this.getCurrentDavPath();
+
+    var wrap = document.createElement('div');
+    wrap.className = 'search-results';
+
+    // Search bar at top
+    var searchForm = document.createElement('div');
+    searchForm.className = 'search-results-bar';
+    var searchInput = document.createElement('input');
+    searchInput.type = 'text';
+    searchInput.value = query;
+    searchInput.placeholder = 'Search documents...';
+    searchInput.className = 'search-results-input';
+    searchForm.appendChild(searchInput);
+
+    // Scope toggle in results window
+    var winScopeBtn = document.createElement('button');
+    winScopeBtn.className = 'toolbar-btn search-scope-btn' + (self._searchThisDir ? '' : ' scope-all');
+    winScopeBtn.title = self._searchThisDir ? 'Search this directory' : 'Search all documents';
+    winScopeBtn.addEventListener('click', function() {
+      self._searchThisDir = !self._searchThisDir;
+      winScopeBtn.classList.toggle('scope-all', !self._searchThisDir);
+      winScopeBtn.title = self._searchThisDir ? 'Search this directory' : 'Search all documents';
+      if (self._updateScopeBtn) self._updateScopeBtn();
+    });
+    searchForm.appendChild(winScopeBtn);
+
+    var winModeBtn = document.createElement('button');
+    winModeBtn.className = 'search-mode-btn';
+    winModeBtn.textContent = self._filenameMode ? 'File' : 'Doc';
+    winModeBtn.title = self._filenameMode ? 'Search filenames' : 'Search document contents';
+    winModeBtn.addEventListener('click', function() {
+      self._filenameMode = !self._filenameMode;
+      winModeBtn.textContent = self._filenameMode ? 'File' : 'Doc';
+      winModeBtn.title = self._filenameMode ? 'Search filenames' : 'Search document contents';
+      if (self._updateModeBtn) self._updateModeBtn();
+    });
+    searchForm.appendChild(winModeBtn);
+
+    var searchSubmit = document.createElement('button');
+    searchSubmit.textContent = 'Search';
+    searchSubmit.className = 'btn btn-sm';
+    searchForm.appendChild(searchSubmit);
+    wrap.appendChild(searchForm);
+
+    var doNewSearch = function() {
+      var q = searchInput.value.trim();
+      if (!q) return;
+      var subPath = self._searchThisDir ? self._lastSubPath : null;
+      if (self._filenameMode) {
+        self._fetchAndShowFiles(q, subPath, 0);
+      } else {
+        self._fetchAndShow(q, subPath, 0);
+      }
+    };
+    searchSubmit.addEventListener('click', doNewSearch);
+    self._acHandledEnter = false;
+    searchInput.addEventListener('keydown', function(e) {
+      if (e.key === 'Enter') {
+        setTimeout(function() {
+          if (self._acHandledEnter) { self._acHandledEnter = false; return; }
+          doNewSearch();
+        }, 0);
+      }
+    });
+    self._attachAutocompletes(searchInput);
+
+    // Summary
+    var summary = document.createElement('div');
+    summary.className = 'search-results-summary';
+    if (results.length) {
+      var totalStr = total === -1 ? 'many' : String(total);
+      summary.textContent = 'Results ' + (skip + 1) + '-' + (skip + results.length) + ' of ' + totalStr + ' for "' + query + '"';
+    } else {
+      summary.textContent = 'No results for "' + query + '"';
+    }
+    wrap.appendChild(summary);
+
+    // Results list
+    var list = document.createElement('div');
+    list.className = 'search-results-list';
+    for (var i = 0; i < results.length; i++) {
+      var r = results[i];
+      var item = document.createElement('div');
+      item.className = 'search-result-item';
+
+      var titleRow = document.createElement('div');
+      titleRow.className = 'search-result-title';
+
+      var openLink = document.createElement('a');
+      openLink.href = '#';
+      openLink.textContent = r.title || r.path;
+      openLink.className = 'search-result-open';
+      (function(res) {
+        openLink.addEventListener('click', function(e) {
+          e.preventDefault();
+          Viewers.open({
+            name: res.path.substring(res.path.lastIndexOf('/') + 1),
+            href: res.href,
+            isDir: false
+          });
+        });
+      })(r);
+      titleRow.appendChild(openLink);
+
+      var showLink = document.createElement('a');
+      showLink.href = '#';
+      showLink.textContent = 'Show in folder';
+      showLink.className = 'search-result-show';
+      (function(res) {
+        showLink.addEventListener('click', function(e) {
+          e.preventDefault();
+          var parentPath = res.href.substring(0, res.href.lastIndexOf('/') + 1);
+          var fileName = decodeURIComponent(res.href.substring(res.href.lastIndexOf('/') + 1));
+          FileList.navigate(parentPath);
+          setTimeout(function() {
+            FileList.selectByName(fileName);
+          }, 500);
+        });
+      })(r);
+      titleRow.appendChild(showLink);
+
+      item.appendChild(titleRow);
+
+      var pathEl = document.createElement('div');
+      pathEl.className = 'search-result-path';
+      pathEl.textContent = r.path;
+      item.appendChild(pathEl);
+
+      if (r.snippet) {
+        var snippetEl = document.createElement('div');
+        snippetEl.className = 'search-result-snippet';
+        snippetEl.innerHTML = r.snippet;
+        item.appendChild(snippetEl);
+      }
+
+      list.appendChild(item);
+    }
+    wrap.appendChild(list);
+
+    // Pagination
+    var pag = document.createElement('div');
+    pag.className = 'search-pagination';
+    var savedSubPath = self._searchThisDir ? self._lastSubPath : null;
+    if (skip > 0) {
+      var prevBtn = document.createElement('a');
+      prevBtn.href = '#';
+      prevBtn.textContent = 'Prev';
+      prevBtn.className = 'search-pag-btn';
+      prevBtn.addEventListener('click', function(e) {
+        e.preventDefault();
+        self._fetchAndShow(query, savedSubPath, skip - self._pageSize);
+      });
+      pag.appendChild(prevBtn);
+    }
+    // Show Next only if we got a full page (meaning there might be more)
+    if (total === -1 || skip + results.length < total) {
+      var nextBtn = document.createElement('a');
+      nextBtn.href = '#';
+      nextBtn.textContent = 'Next';
+      nextBtn.className = 'search-pag-btn';
+      nextBtn.addEventListener('click', function(e) {
+        e.preventDefault();
+        self._fetchAndShow(query, savedSubPath, skip + self._pageSize);
+      });
+      pag.appendChild(nextBtn);
+    }
+    if (pag.children.length) wrap.appendChild(pag);
+
+    // Open or reuse window
+    if (this._winId && WinManager.getWindow(this._winId)) {
+      var win = WinManager.getWindow(this._winId);
+      var body = win.el.querySelector('.win-body');
+      body.innerHTML = '';
+      body.appendChild(wrap);
+      WinManager.setTitle(this._winId, this._buildTitle(query));
+      searchInput.focus();
+    } else {
+      this._winId = WinManager.open(this._buildTitle(query), wrap, {});
+      var winEl = WinManager.getWindow(this._winId).el;
+      winEl.style.width = Math.min(500, window.innerWidth) + 'px';
+      winEl.style.height = Math.min(600, window.innerHeight * 0.7) + 'px';
+      setTimeout(function() { searchInput.focus(); }, 100);
+    }
+  },
+
+  // Fetch results and display them
+  async _fetchAndShow(query, subPath, skip) {
+    try {
+      var resp = await fetch(App.davUrl + '_search', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'same-origin',
+        body: JSON.stringify({ query: query, subPath: subPath, maxRows: this._pageSize, skipRows: skip })
+      });
+      var data = await resp.json();
+      if (!data.ok) {
+        Toast.error('Search failed: ' + (data.error || 'Unknown error'));
+        return;
+      }
+      this.showResults(data.query, data.results, data.total, skip);
+    } catch(e) {
+      Toast.error('Search failed: ' + e.message);
+    }
+  },
+
+  // --- Filename search ---
+
+  async _fetchAndShowFiles(query, subPath, skip) {
+    try {
+      var resp = await fetch(App.davUrl + '_search/files', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'same-origin',
+        body: JSON.stringify({ query: query, subPath: subPath, maxRows: this._pageSize, skipRows: skip })
+      });
+      var data = await resp.json();
+      if (!data.ok) {
+        Toast.error('Search failed: ' + (data.error || 'Unknown error'));
+        return;
+      }
+      this.showFileResults(data.query, data.results, data.total, skip);
+    } catch(e) {
+      Toast.error('Search failed: ' + e.message);
+    }
+  },
+
+  showFileResults(query, results, total, skip) {
+    var self = this;
+    skip = skip || 0;
+    this._lastSubPath = this.getCurrentDavPath();
+
+    var wrap = document.createElement('div');
+    wrap.className = 'search-results';
+
+    // Search bar
+    var searchForm = document.createElement('div');
+    searchForm.className = 'search-results-bar';
+    var searchInput = document.createElement('input');
+    searchInput.type = 'text';
+    searchInput.value = query;
+    searchInput.placeholder = 'Filename search...';
+    searchInput.className = 'search-results-input';
+    searchForm.appendChild(searchInput);
+
+    var winScopeBtn = document.createElement('button');
+    winScopeBtn.className = 'toolbar-btn search-scope-btn' + (self._searchThisDir ? '' : ' scope-all');
+    winScopeBtn.title = self._searchThisDir ? 'Search this directory' : 'Search all files';
+    winScopeBtn.addEventListener('click', function() {
+      self._searchThisDir = !self._searchThisDir;
+      winScopeBtn.classList.toggle('scope-all', !self._searchThisDir);
+      winScopeBtn.title = self._searchThisDir ? 'Search this directory' : 'Search all files';
+      if (self._updateScopeBtn) self._updateScopeBtn();
+    });
+    searchForm.appendChild(winScopeBtn);
+
+    var winModeBtn = document.createElement('button');
+    winModeBtn.className = 'search-mode-btn';
+    winModeBtn.textContent = self._filenameMode ? 'File' : 'Doc';
+    winModeBtn.title = self._filenameMode ? 'Search filenames' : 'Search document contents';
+    winModeBtn.addEventListener('click', function() {
+      self._filenameMode = !self._filenameMode;
+      winModeBtn.textContent = self._filenameMode ? 'File' : 'Doc';
+      winModeBtn.title = self._filenameMode ? 'Search filenames' : 'Search document contents';
+      if (self._updateModeBtn) self._updateModeBtn();
+    });
+    searchForm.appendChild(winModeBtn);
+
+    var searchSubmit = document.createElement('button');
+    searchSubmit.textContent = 'Search';
+    searchSubmit.className = 'btn btn-sm';
+    searchForm.appendChild(searchSubmit);
+    wrap.appendChild(searchForm);
+
+    var doNewSearch = function() {
+      var q = searchInput.value.trim();
+      if (!q) return;
+      var subPath = self._searchThisDir ? self._lastSubPath : null;
+      if (self._filenameMode) {
+        self._fetchAndShowFiles(q, subPath, 0);
+      } else {
+        self._fetchAndShow(q, subPath, 0);
+      }
+    };
+    searchSubmit.addEventListener('click', doNewSearch);
+    self._acHandledEnter = false;
+    searchInput.addEventListener('keydown', function(e) {
+      if (e.key === 'Enter') {
+        setTimeout(function() {
+          if (self._acHandledEnter) { self._acHandledEnter = false; return; }
+          doNewSearch();
+        }, 0);
+      }
+    });
+    self._attachAutocompletes(searchInput);
+
+    // Summary
+    var summary = document.createElement('div');
+    summary.className = 'search-results-summary';
+    if (results.length) {
+      var totalStr = total === -1 ? 'many' : String(total);
+      summary.textContent = 'Results ' + (skip + 1) + '-' + (skip + results.length) + ' of ' + totalStr + ' for "' + query + '"';
+    } else {
+      summary.textContent = 'No results for "' + query + '"';
+    }
+    wrap.appendChild(summary);
+
+    // Results list
+    var list = document.createElement('div');
+    list.className = 'search-results-list';
+    for (var i = 0; i < results.length; i++) {
+      var r = results[i];
+      var item = document.createElement('div');
+      item.className = 'search-result-item';
+
+      var titleRow = document.createElement('div');
+      titleRow.className = 'search-result-title';
+
+      var fileName = r.path.substring(r.path.lastIndexOf('/') + 1);
+      var openLink = document.createElement('a');
+      openLink.href = '#';
+      openLink.textContent = fileName;
+      openLink.className = 'search-result-open';
+      (function(res, isDir) {
+        openLink.addEventListener('click', function(e) {
+          e.preventDefault();
+          if (isDir) {
+            App.navigateTo(App.davUrl.replace(/\/$/, '') + res.path + '/');
+          } else {
+            Viewers.open({name: res.path.substring(res.path.lastIndexOf('/') + 1), href: res.href, isDir: false});
+          }
+        });
+      })(r, r.isDir);
+      titleRow.appendChild(openLink);
+
+      if (r.isDir) {
+        var dirBadge = document.createElement('span');
+        dirBadge.textContent = 'folder';
+        dirBadge.style.cssText = 'font-size:11px;color:var(--color-fg-muted);margin-left:8px';
+        titleRow.appendChild(dirBadge);
+      }
+
+      var showLink = document.createElement('a');
+      showLink.href = '#';
+      showLink.textContent = 'Show in folder';
+      showLink.className = 'search-result-show';
+      (function(res) {
+        showLink.addEventListener('click', function(e) {
+          e.preventDefault();
+          var parentPath = res.href.substring(0, res.href.lastIndexOf('/') + 1);
+          var fName = decodeURIComponent(res.href.substring(res.href.lastIndexOf('/') + 1));
+          FileList.navigate(parentPath);
+          setTimeout(function() { FileList.selectByName(fName); }, 500);
+        });
+      })(r);
+      titleRow.appendChild(showLink);
+
+      item.appendChild(titleRow);
+
+      var pathEl = document.createElement('div');
+      pathEl.className = 'search-result-path';
+      pathEl.textContent = r.path;
+      item.appendChild(pathEl);
+
+      list.appendChild(item);
+    }
+    wrap.appendChild(list);
+
+    // Pagination
+    var pag = document.createElement('div');
+    pag.className = 'search-pagination';
+    var savedSubPath = self._searchThisDir ? self._lastSubPath : null;
+    if (skip > 0) {
+      var prevBtn = document.createElement('a');
+      prevBtn.href = '#';
+      prevBtn.textContent = 'Prev';
+      prevBtn.className = 'search-pag-btn';
+      prevBtn.addEventListener('click', function(e) {
+        e.preventDefault();
+        self._fetchAndShowFiles(query, savedSubPath, skip - self._pageSize);
+      });
+      pag.appendChild(prevBtn);
+    }
+    if (total === -1 || skip + results.length < total) {
+      var nextBtn = document.createElement('a');
+      nextBtn.href = '#';
+      nextBtn.textContent = 'Next';
+      nextBtn.className = 'search-pag-btn';
+      nextBtn.addEventListener('click', function(e) {
+        e.preventDefault();
+        self._fetchAndShowFiles(query, savedSubPath, skip + self._pageSize);
+      });
+      pag.appendChild(nextBtn);
+    }
+    if (pag.children.length) wrap.appendChild(pag);
+
+    // Open or reuse window
+    if (this._winId && WinManager.getWindow(this._winId)) {
+      var win = WinManager.getWindow(this._winId);
+      var body = win.el.querySelector('.win-body');
+      body.innerHTML = '';
+      body.appendChild(wrap);
+      WinManager.setTitle(this._winId, this._buildTitle(query));
+      searchInput.focus();
+    } else {
+      this._winId = WinManager.open(this._buildTitle(query), wrap, {});
+      var winEl = WinManager.getWindow(this._winId).el;
+      winEl.style.width = Math.min(500, window.innerWidth) + 'px';
+      winEl.style.height = Math.min(600, window.innerHeight * 0.7) + 'px';
+      setTimeout(function() { searchInput.focus(); }, 100);
+    }
+  },
+
+  init() {
+    var self = this;
+    var searchBtn = document.getElementById('search-btn');
+    var searchBar = document.getElementById('search-bar');
+    var searchInput = document.getElementById('search-input');
+    var searchCancel = document.getElementById('search-cancel');
+
+    searchBtn.addEventListener('click', function() {
+      self.showInput();
+    });
+
+    searchCancel.addEventListener('click', function() {
+      self.hideInput();
+    });
+
+    var scopeBtn = document.getElementById('search-scope-btn');
+    self._updateScopeBtn = function() {
+      scopeBtn.classList.toggle('scope-all', !self._searchThisDir);
+      scopeBtn.title = self._searchThisDir ? 'Search this directory' : 'Search all';
+    };
+    self._updateScopeBtn();
+    scopeBtn.addEventListener('click', function() {
+      self._searchThisDir = !self._searchThisDir;
+      self._updateScopeBtn();
+      self._updatePlaceholder();
+    });
+
+    var modeBtn = document.getElementById('search-mode-btn');
+    self._updateModeBtn = function() {
+      modeBtn.textContent = self._filenameMode ? 'File' : 'Doc';
+      modeBtn.title = self._filenameMode ? 'Search filenames' : 'Search document contents';
+      self._updatePlaceholder();
+    };
+    modeBtn.addEventListener('click', function() {
+      self._filenameMode = !self._filenameMode;
+      self._updateModeBtn();
+    });
+
+    self._acHandledEnter = false;
+
+    searchInput.addEventListener('keydown', function(e) {
+      if (e.key === 'Enter') {
+        // Defer slightly so autocomplete's handler can set the flag
+        setTimeout(function() {
+          if (self._acHandledEnter) { self._acHandledEnter = false; return; }
+          var q = searchInput.value.trim();
+          if (q) self.doSearch(q);
+        }, 0);
+      } else if (e.key === 'Escape') {
+        self.hideInput();
+        self._updatePlaceholder();
+      }
+    });
+
+    self._attachAutocompletes(searchInput);
+  },
+
+  // Attach all three autocomplete handlers to a search input
+  _attachAutocompletes(searchInput) {
+    var self = this;
+
+    // Autocomplete for path suggestions (when in filename mode and starts with '/')
+    Autocomplete.attach(searchInput, {
+      minLength: 2,
+      debounceMs: 150,
+      onEnterHandled: function() { self._acHandledEnter = true; },
+      shouldActivate: function(val) {
+        return self._filenameMode && val.indexOf('/') === 0;
+      },
+      fetchSuggestions: function(query, callback) {
+        // Absolute path query — don't filter by current directory
+        var sugUrl = App.davUrl + '_search/suggest?q=' + encodeURIComponent(query) + '&max=10';
+        fetch(sugUrl, {credentials: 'same-origin'})
+          .then(function(r) { return r.json(); })
+          .then(function(data) {
+            if (data.ok && data.suggestions) {
+              callback(data.suggestions.map(function(s) {
+                return {label: s.path + (s.isDir ? '/' : ''), value: s.path, isDir: s.isDir};
+              }));
+            } else {
+              callback([]);
+            }
+          })
+          .catch(function() { callback([]); });
+      },
+      onSelect: function(item, input) {
+        if (item.isDir) {
+          // Navigate to the directory
+          self.hideInput();
+          App.navigateTo(App.davUrl.replace(/\/$/, '') + item.value + '/');
+        } else {
+          // Open the file
+          self.hideInput();
+          var fileName = item.value.substring(item.value.lastIndexOf('/') + 1);
+          Viewers.open({
+            name: fileName,
+            href: App.davUrl.replace(/\/$/, '') + item.value,
+            isDir: false
+          });
+        }
+      }
+    });
+
+    // Autocomplete for filename word search (when in filename mode, not starting with '/')
+    Autocomplete.attach(searchInput, {
+      minLength: 2,
+      debounceMs: 200,
+      onEnterHandled: function() { self._acHandledEnter = true; },
+      shouldActivate: function(val) {
+        return self._filenameMode && val.indexOf('/') !== 0;
+      },
+      fetchSuggestions: function(query, callback) {
+        var sugUrl = App.davUrl + '_search/suggest?mode=pathword&q=' + encodeURIComponent(query) + '&max=8';
+        if (self._searchThisDir) sugUrl += '&subPath=' + encodeURIComponent(self.getCurrentDavPath());
+        fetch(sugUrl, {credentials: 'same-origin'})
+          .then(function(r) { return r.json(); })
+          .then(function(data) {
+            if (data.ok && data.suggestions) {
+              callback(data.suggestions.map(function(s) {
+                return {label: s.path, value: s.path, isDir: s.isDir};
+              }));
+            } else {
+              callback([]);
+            }
+          })
+          .catch(function() { callback([]); });
+      },
+      onSelect: function(item, input) {
+        self.hideInput();
+        if (item.isDir) {
+          App.navigateTo(App.davUrl.replace(/\/$/, '') + item.value + '/');
+        } else {
+          var fileName = item.value.substring(item.value.lastIndexOf('/') + 1);
+          Viewers.open({
+            name: fileName,
+            href: App.davUrl.replace(/\/$/, '') + item.value,
+            isDir: false
+          });
+        }
+      }
+    });
+
+    // Autocomplete for word suggestions (when in doc mode)
+    Autocomplete.attach(searchInput, {
+      minLength: 2,
+      debounceMs: 200,
+      onEnterHandled: function() { self._acHandledEnter = true; },
+      shouldActivate: function(val) {
+        if (self._filenameMode) return false;
+        var words = val.trim().split(/\s+/);
+        var last = words[words.length - 1];
+        return last.length >= 2;
+      },
+      fetchSuggestions: function(query, callback) {
+        fetch(App.davUrl + '_search/suggest?mode=word&q=' + encodeURIComponent(query) + '&max=8', {credentials: 'same-origin'})
+          .then(function(r) { return r.json(); })
+          .then(function(data) {
+            if (data.ok && data.suggestions) {
+              callback(data.suggestions);
+            } else {
+              callback([]);
+            }
+          })
+          .catch(function() { callback([]); });
+      },
+      onSelect: function(item, input) {
+        input.value = item.value;
+        self.doSearch(item.value);
+      }
     });
   }
 };
@@ -2301,6 +3185,23 @@ const Tree = {
     // Click row to navigate (clicking on the row itself)
     row.addEventListener('click', () => {
       App.navigateTo(href);
+    });
+
+    // Right-click context menu
+    row.addEventListener('contextmenu', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      // Create a fake item for the context menu
+      var dirItem = {
+        name: name,
+        href: href,
+        isDir: true,
+        mime: 'httpd/unix-directory'
+      };
+      // Select this directory in the file list so context menu actions work
+      FileList.selected.clear();
+      FileList.selected.add(href);
+      App.showContextMenu(e, dirItem);
     });
 
     // Drop target for drag-and-drop into this folder
@@ -3295,6 +4196,21 @@ const FileList = {
     this.render();
   },
 
+  selectByName(name) {
+    for (var i = 0; i < this.items.length; i++) {
+      if (this.items[i].name === name) {
+        this.selected.clear();
+        this.selected.add(this.items[i].href);
+        this._updateSelectionBar();
+        this.render();
+        // Scroll to the item
+        var row = document.querySelector('[data-href="' + this.items[i].href + '"]');
+        if (row) row.scrollIntoView({ block: 'center', behavior: 'smooth' });
+        return;
+      }
+    }
+  },
+
   _updateSelectionBar() {
     const hasSelection = this.selected.size > 0;
     document.getElementById('sel-copy').disabled = !hasSelection;
@@ -3766,6 +4682,27 @@ const Toolbar = {
       document.getElementById('sidebar-overlay').hidden = true;
     });
 
+    // Swipe left on sidebar to close it
+    (function() {
+      var sidebar = document.getElementById('sidebar');
+      var touchStartX = 0;
+      var touchStartY = 0;
+      sidebar.addEventListener('touchstart', function(e) {
+        if (e.touches.length !== 1) return;
+        touchStartX = e.touches[0].clientX;
+        touchStartY = e.touches[0].clientY;
+      }, {passive: true});
+      sidebar.addEventListener('touchend', function(e) {
+        if (!sidebar.classList.contains('sidebar-open')) return;
+        var dx = e.changedTouches[0].clientX - touchStartX;
+        var dy = e.changedTouches[0].clientY - touchStartY;
+        if (dx < -50 && Math.abs(dy) < Math.abs(dx)) {
+          sidebar.classList.remove('sidebar-open');
+          document.getElementById('sidebar-overlay').hidden = true;
+        }
+      }, {passive: true});
+    })();
+
     // Sidebar resize drag
     const resizeHandle = document.getElementById('sidebar-resize');
     const appEl = document.getElementById('app');
@@ -3838,6 +4775,8 @@ const Toolbar = {
       })(segUrl));
       bc.appendChild(link);
     }
+    Search.updateButton();
+    Search._lastSubPath = Search.getCurrentDavPath();
   },
 
   updateViewToggle(mode) {
@@ -4452,7 +5391,7 @@ const Upload = {
 const Viewers = {
   TYPES: {
     office: /\.(docx?|xlsx?|pptx?|odt|ods|odp|csv|rtf|fodp|fods|fodt)$/i,
-    code: /\.(js|mjs|ts|tsx|jsx|py|rb|c|h|cpp|hpp|java|go|rs|php|sh|bash|lua|pl|r|swift|kt|scala|zig|asm|css|scss|less|html?|xml|json|yaml|yml|toml|ini|conf|sql|makefile|dockerfile|txt|log|md|diff|patch|env|gitignore|editorconfig)$/i,
+    code: /\.(js|mjs|ts|tsx|jsx|py|rb|c|h|cpp|hpp|java|go|rs|php|sh|bash|lua|pl|r|swift|kt|scala|zig|asm|css|scss|less|html?|xml|json|yaml|yml|toml|ini|conf|sql|makefile|dockerfile|txt|log|md|diff|patch|env|gitignore|editorconfig|srt|vtt)$/i,
     image: /\.(png|jpe?g|gif|svg|webp|bmp|ico|tiff?)$/i,
     video: /\.(mp4|webm|ogg|ogv)$/i,
     audio: /\.(mp3|wav|ogg|oga|flac|aac|m4a|opus|wma)$/i,
@@ -6231,7 +7170,7 @@ const Viewers = {
     if (!window.jsmediatags) {
       await new Promise(function(resolve, reject) {
         var s = document.createElement('script');
-        s.src = 'https://cdn.jsdelivr.net/npm/jsmediatags@3.9.7/dist/jsmediatags.min.js';
+        s.src = CDN.jsmediatags;
         s.onload = resolve;
         s.onerror = reject;
         document.head.appendChild(s);
@@ -6328,14 +7267,14 @@ const Viewers = {
       const link = document.createElement('link');
       link.id = 'videojs-css';
       link.rel = 'stylesheet';
-      link.href = 'https://cdn.jsdelivr.net/npm/video.js@8/dist/video-js.min.css';
+      link.href = CDN.videojsCss;
       document.head.appendChild(link);
     }
     // Load JS
     if (!window.videojs) {
       await new Promise((resolve, reject) => {
         const s = document.createElement('script');
-        s.src = 'https://cdn.jsdelivr.net/npm/video.js@8/dist/video.min.js';
+        s.src = CDN.videojsJs;
         s.onload = resolve;
         s.onerror = reject;
         document.head.appendChild(s);
@@ -6430,19 +7369,83 @@ const Viewers = {
     });
   },
 
-  _openPdf(item) {
-    const iframe = document.createElement('iframe');
-    iframe.className = 'pdf-viewer';
-    iframe.src = item.href;
+  async _openPdf(item) {
+    // Fetch PDF as blob, create object URL
+    // On desktop, iframe renders it natively
+    // On mobile, use PDF.js from CDN for rendering
+    try {
+      var resp = await fetch(item.href, {credentials: 'same-origin'});
+      if (!resp.ok) { Toast.error('Failed to load PDF'); return; }
+      var blob = await resp.blob();
+      var url = URL.createObjectURL(blob);
 
-    WinManager.open(item.name, iframe, { type: 'pdf', full: true });
+      var isMobile = 'ontouchstart' in window;
+      if (!isMobile) {
+        // Desktop: native PDF rendering in iframe
+        var iframe = document.createElement('iframe');
+        iframe.className = 'pdf-viewer';
+        iframe.src = url;
+        WinManager.open(item.name, iframe, {
+          type: 'pdf', full: true,
+          onClose: function() { URL.revokeObjectURL(url); }
+        });
+      } else {
+        // Mobile: use PDF.js
+        var wrap = document.createElement('div');
+        wrap.style.cssText = 'width:100%;height:100%;overflow:auto;background:#333';
+        var winId = WinManager.open(item.name, wrap, {
+          type: 'pdf', full: true, noPadding: true,
+          onClose: function() { URL.revokeObjectURL(url); }
+        });
+        // Load PDF.js if not already loaded
+        if (!window.pdfjsLib) {
+          var script = document.createElement('script');
+          script.src = CDN.pdfjsJs;
+          script.type = 'module';
+          // Use a simpler approach: load the legacy build
+          script.src = CDN.pdfjsJs;
+          script.type = 'text/javascript';
+          script.onload = function() {
+            window.pdfjsLib.GlobalWorkerOptions.workerSrc = CDN.pdfjsWorker;
+            renderPdfToWrap(url, wrap);
+          };
+          document.head.appendChild(script);
+        } else {
+          renderPdfToWrap(url, wrap);
+        }
+      }
+    } catch(e) {
+      Toast.error('Failed to load PDF: ' + e.message);
+    }
+
+    function renderPdfToWrap(pdfUrl, container) {
+      window.pdfjsLib.getDocument(pdfUrl).promise.then(function(pdf) {
+        for (var p = 1; p <= pdf.numPages; p++) {
+          (function(pageNum) {
+            pdf.getPage(pageNum).then(function(page) {
+              var scale = Math.min(
+                (container.clientWidth || 400) / page.getViewport({scale: 1}).width,
+                2
+              );
+              var viewport = page.getViewport({scale: scale});
+              var canvas = document.createElement('canvas');
+              canvas.style.cssText = 'display:block;margin:4px auto;';
+              canvas.width = viewport.width;
+              canvas.height = viewport.height;
+              container.appendChild(canvas);
+              page.render({canvasContext: canvas.getContext('2d'), viewport: viewport});
+            });
+          })(p);
+        }
+      });
+    }
   },
 
   _loadFilerobot() {
     if (this._loaded.filerobot) return Promise.resolve();
     return new Promise(function(resolve, reject) {
       var s = document.createElement('script');
-      s.src = 'https://scaleflex.cloudimg.io/v7/plugins/filerobot-image-editor/latest/filerobot-image-editor.min.js';
+      s.src = CDN.filerobot;
       s.onload = function() {
         Viewers._loaded.filerobot = true;
         resolve();
@@ -6458,11 +7461,11 @@ const Viewers = {
       // Load CSS first
       var link = document.createElement('link');
       link.rel = 'stylesheet';
-      link.href = 'https://cdnjs.cloudflare.com/ajax/libs/jodit/4.6.13/es2018/jodit.min.css';
+      link.href = CDN.joditCss;
       document.head.appendChild(link);
       // Then JS
       var s = document.createElement('script');
-      s.src = 'https://cdnjs.cloudflare.com/ajax/libs/jodit/4.6.13/es2018/jodit.min.js';
+      s.src = CDN.joditJs;
       s.onload = function() {
         Viewers._loaded.jodit = true;
         resolve();
@@ -6648,7 +7651,9 @@ const Viewers = {
       showXPathInStatusbar: false,
       askBeforePasteHTML: false,
       askBeforePasteFromWord: false,
-      defaultActionOnPaste: 'insert_only_text'
+      defaultActionOnPaste: 'insert_only_text',
+      beautifyHTMLCDNUrlsJS: [CDN.beautifyJs, CDN.beautifyHtmlJs],
+      sourceEditorCDNUrlsJS: [CDN.aceJs]
     });
     joditInstance.value = bodyContent;
     // Reset dirty after initial value set, then track changes
@@ -6991,7 +7996,7 @@ const Viewers = {
     if (!window.JSZip) {
       await new Promise((resolve, reject) => {
         const s = document.createElement('script');
-        s.src = 'https://cdn.jsdelivr.net/npm/jszip@3/dist/jszip.min.js';
+        s.src = CDN.jszip;
         s.onload = resolve;
         s.onerror = reject;
         document.head.appendChild(s);
@@ -7001,7 +8006,7 @@ const Viewers = {
     if (!window.ePub) {
       await new Promise((resolve, reject) => {
         const s = document.createElement('script');
-        s.src = 'https://cdn.jsdelivr.net/npm/epubjs@0.3/dist/epub.min.js';
+        s.src = CDN.epubjs;
         s.onload = resolve;
         s.onerror = reject;
         document.head.appendChild(s);
@@ -7203,7 +8208,7 @@ const Viewers = {
           if (!window.marked) {
             await new Promise(function(resolve, reject) {
               var s = document.createElement('script');
-              s.src = 'https://cdn.jsdelivr.net/npm/marked@15/marked.min.js';
+              s.src = CDN.marked;
               s.onload = resolve;
               s.onerror = reject;
               document.head.appendChild(s);
@@ -7395,15 +8400,39 @@ const Viewers = {
     'vscode-dark':     { label: 'VS Code Dark',     pkg: '@uiw/codemirror-theme-vscode', exp: 'vscodeDark' },
   },
 
+  // Map theme names to bundle export keys
+  _cmThemeBundleMap: {
+    'one-dark': 'themeOneDark',
+    'dracula': 'themeDracula',
+    'github-light': 'themeGithub',
+    'github-dark': 'themeGithub',
+    'material-dark': 'themeMaterial',
+    'material-light': 'themeMaterial',
+    'monokai': 'themeMonokai',
+    'nord': 'themeNord',
+    'solarized-light': 'themeSolarized',
+    'solarized-dark': 'themeSolarized',
+    'tokyo-night': 'themeTokyoNight',
+    'vscode-dark': 'themeVscode',
+  },
+
   async _loadCmTheme(name) {
     if (!window._CM) return null;
     if (window._CM._themes && window._CM._themes[name]) return window._CM._themes[name];
     var info = this.cmThemes[name];
     if (!info) return null;
+    if (!window._CM._themes) window._CM._themes = {};
     try {
-      var mod = await import('https://esm.sh/' + info.pkg);
-      var ext = mod[info.exp];
-      if (!window._CM._themes) window._CM._themes = {};
+      var ext;
+      if (window._CM._bundle && this._cmThemeBundleMap[name]) {
+        var bundleMod = window._CM._bundle[this._cmThemeBundleMap[name]];
+        ext = bundleMod[info.exp];
+      } else if (CDN.esm) {
+        var mod = await import(CDN.esm + info.pkg);
+        ext = mod[info.exp];
+      } else {
+        return null;
+      }
       window._CM._themes[name] = ext;
       return ext;
     } catch (e) {
@@ -7413,35 +8442,56 @@ const Viewers = {
   },
 
   async _loadCodeMirror() {
-    // Pin codemirror@6.0.1 — the real CM6 meta-package.
-    // (codemirror@6.65.7 on npm is a bogus publish containing CM5 code.)
-    // No ?bundle — let esm.sh resolve shared deps so the browser deduplicates.
-    const cm = await import('https://esm.sh/codemirror@6.0.1');
-    const stateModule = await import('https://esm.sh/@codemirror/state@6');
-    window._CM = {
-      EditorView: cm.EditorView,
-      EditorState: stateModule.EditorState,
-      Compartment: stateModule.Compartment,
-      basicSetup: cm.basicSetup,
-      oneDark: null,
-      langs: {},
-    };
-    this._loaded.codemirror = true;
-
-    // Pre-load one-dark since it's also the auto-dark fallback
-    import('https://esm.sh/@codemirror/theme-one-dark@6').then(m => {
-      window._CM.oneDark = m.oneDark;
+    if (CDN.cmBundle) {
+      // Local bundle: everything in one file
+      const bundle = await import(CDN.cmBundle);
+      const cm = bundle.codemirror;
+      const stateModule = bundle.state;
+      window._CM = {
+        EditorView: cm.EditorView,
+        EditorState: stateModule.EditorState,
+        Compartment: stateModule.Compartment,
+        basicSetup: cm.basicSetup,
+        oneDark: bundle.themeOneDark.oneDark,
+        langs: {},
+        _bundle: bundle,
+      };
       if (!window._CM._themes) window._CM._themes = {};
-      window._CM._themes['one-dark'] = m.oneDark;
-    }).catch(() => {});
+      window._CM._themes['one-dark'] = bundle.themeOneDark.oneDark;
+    } else {
+      // CDN: load from esm.sh
+      const cm = await import(CDN.esm + 'codemirror@6.0.1');
+      const stateModule = await import(CDN.esm + '@codemirror/state@6');
+      window._CM = {
+        EditorView: cm.EditorView,
+        EditorState: stateModule.EditorState,
+        Compartment: stateModule.Compartment,
+        basicSetup: cm.basicSetup,
+        oneDark: null,
+        langs: {},
+      };
+      // Pre-load one-dark since it's also the auto-dark fallback
+      import(CDN.esm + '@codemirror/theme-one-dark@6').then(m => {
+        window._CM.oneDark = m.oneDark;
+        if (!window._CM._themes) window._CM._themes = {};
+        window._CM._themes['one-dark'] = m.oneDark;
+      }).catch(() => {});
+    }
+    this._loaded.codemirror = true;
   },
 
   async _getLanguageExtension(filename) {
-    // Load the language data registry (133 languages, lazy-loaded)
+    // Load the language data registry
     if (!window._CM._langDescs) {
       try {
-        const mod = await import('https://esm.sh/@codemirror/language-data@6');
-        window._CM._langDescs = mod.languages;
+        if (window._CM._bundle) {
+          window._CM._langDescs = window._CM._bundle.languageData.languages;
+        } else if (CDN.esm) {
+          const mod = await import(CDN.esm + '@codemirror/language-data@6');
+          window._CM._langDescs = mod.languages;
+        } else {
+          return null;
+        }
       } catch (e) {
         console.warn('Language data failed to load:', e);
         return null;
@@ -7577,6 +8627,13 @@ const App = {
 
       if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT') return;
 
+      // '/' key opens search bar
+      if (e.key === '/') {
+        e.preventDefault();
+        Search.showInput();
+        return;
+      }
+
       // Don't intercept navigation keys when a viewer window is focused
       var hasWin = WinManager.getFocusedWindow();
       if (hasWin && !e.ctrlKey && !e.metaKey && (e.key === 'ArrowDown' || e.key === 'ArrowUp' || e.key === ' ' || e.key === 'Enter' || e.key === 'Backspace')) return;
@@ -7702,6 +8759,7 @@ const App = {
     Tree.init();
     Toolbar.init();
     Upload.init();
+    Search.init();
     this._applyGridSettings();
 
     // Fetch user settings to populate Auth.groups
@@ -7719,6 +8777,7 @@ const App = {
         Auth.sshHosts = settingsData.sshHosts || [];
         Auth.demoMode = !!settingsData.demoMode;
         Auth.demoClearTime = settingsData.demoClearTime || 0;
+        Auth.searchDirs = settingsData.searchDirs || [];
         Auth.mountNames = [];
         Auth.readOnlyMounts = [];
         Auth.theme = settingsData.theme || 'auto';
@@ -7786,6 +8845,22 @@ const App = {
     document.getElementById('login-pass').value = '';
     document.getElementById('login-error').textContent = '';
     document.title = 'File Manager';
+
+    // Check if any users/admins exist
+    fetch(App.davUrl + '_status').then(function(r) { return r.json(); }).then(function(data) {
+      if (!data.ok) return;
+      var errEl = document.getElementById('login-error');
+      if (!data.hasUsers) {
+        errEl.innerHTML = '<strong>No user accounts exist.</strong><br>' +
+          'Create an admin account from the command line:<br><br>' +
+          '<code style="white-space:pre-wrap">./admin.sh add &lt;username&gt; &lt;password&gt;\n' +
+          './admin.sh admin &lt;username&gt; true</code>';
+      } else if (!data.hasAdmin) {
+        errEl.innerHTML = '<strong>No administrator account exists.</strong><br>' +
+          'Promote a user to admin from the command line:<br><br>' +
+          '<code>./admin.sh admin &lt;username&gt; true</code>';
+      }
+    }).catch(function() {});
   },
 
   showApp() {
@@ -8209,6 +9284,42 @@ const App = {
       this._populatePlaylistSubmenu(actionItems);
     }
 
+    // Search indexing toggle — only for directories, single selection
+    var searchSep = menu.querySelector('.ctx-search-sep');
+    var searchToggle = menu.querySelector('[data-action="toggle-search"]');
+    searchSep.hidden = true;
+    searchToggle.hidden = true;
+    if (item.isDir && FileList.selected.size <= 1) {
+      // Get the dav-relative path for this directory
+      var itemDavPath = item.href.replace(App.davUrl.replace(/\/$/, ''), '').replace(/\/$/, '');
+      // Check search status asynchronously, update menu item
+      (function(davPath, sep, btn) {
+        fetch(App.davUrl + '_search/status?path=' + encodeURIComponent(davPath), {credentials: 'same-origin'})
+          .then(function(r) { return r.json(); })
+          .then(function(data) {
+            if (!data.ok) return;
+            if (data.mountBlocked) return; // mounted dirs: don't show toggle
+            sep.hidden = false;
+            btn.hidden = false;
+            if (data.parentIndexed) {
+              btn.textContent = '\u2713 Search Indexing (inherited)';
+              btn.disabled = true;
+              btn.classList.add('ctx-always-on');
+            } else if (data.indexed) {
+              btn.textContent = '\u2713 Search Indexing';
+              btn.disabled = false;
+              btn.classList.remove('ctx-always-on');
+            } else {
+              btn.textContent = '    Search Indexing';
+              btn.disabled = false;
+              btn.classList.remove('ctx-always-on');
+            }
+            btn._searchPath = davPath;
+            btn._searchEnabled = data.indexed;
+          }).catch(function() {});
+      })(itemDavPath, searchSep, searchToggle);
+    }
+
     this._wireSubmenus(menu);
 
     // Wire actions
@@ -8609,6 +9720,34 @@ const App = {
       case 'edit-html':
         Viewers._openHtmlEditor(item);
         break;
+      case 'toggle-search': {
+        var toggleBtn = document.querySelector('[data-action="toggle-search"]');
+        var searchPath = toggleBtn._searchPath;
+        var isEnabled = toggleBtn._searchEnabled;
+        if (!searchPath) break;
+        try {
+          var resp = await fetch(App.davUrl + '_search/toggle', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'same-origin',
+            body: JSON.stringify({ path: searchPath, enable: !isEnabled })
+          });
+          var data = await resp.json();
+          if (data.ok) {
+            Toast.success(data.message);
+            // Refresh searchDirs
+            var sResp = await fetch(App.davUrl + '_settings', { credentials: 'same-origin' });
+            var sData = await sResp.json();
+            if (sData.ok) Auth.searchDirs = sData.searchDirs || [];
+            Search.updateButton();
+          } else {
+            Toast.error(data.error || 'Failed');
+          }
+        } catch(e) {
+          Toast.error('Failed: ' + e.message);
+        }
+        break;
+      }
     }
     FileList.clearSelection();
   },
@@ -9769,15 +10908,15 @@ const App = {
       // Load CSS
       var link = document.createElement('link');
       link.rel = 'stylesheet';
-      link.href = 'https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.min.css';
+      link.href = CDN.xtermCss;
       document.head.appendChild(link);
       // Load xterm.js
       var s1 = document.createElement('script');
-      s1.src = 'https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.min.js';
+      s1.src = CDN.xtermJs;
       s1.onload = function() {
         // Load fit addon
         var s2 = document.createElement('script');
-        s2.src = 'https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.min.js';
+        s2.src = CDN.xtermFit;
         s2.onload = function() {
           Viewers._loaded.xterm = true;
           resolve();
@@ -10027,9 +11166,12 @@ const App = {
         '<div class="settings-field">' +
           '<label>Theme</label>' +
           '<select id="set-theme">' +
+            '<option value="auto">Auto (system)</option>' +
             '<option value="light">Light</option>' +
             '<option value="dark">Dark</option>' +
-            '<option value="auto">Auto (system)</option>' +
+            (settings.themes || []).map(function(t) {
+              return '<option value="' + t.value + '">' + t.label + '</option>';
+            }).join('') +
           '</select>' +
         '</div>' +
         '<div class="settings-field" style="margin-top:8px">' +

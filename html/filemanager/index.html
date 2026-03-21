@@ -5,6 +5,10 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>File Manager</title>
   <link rel="stylesheet" href="css/style.css">
+  <script>
+    // Uncomment the next line to use locally hosted scripts instead of CDN
+    var useLocalScripts = true;
+  </script>
   <script src="js/filemanager.js" defer></script>
 </head>
 <body>
@@ -67,8 +71,18 @@
                 title="Forward" disabled aria-label="Forward"></button>
         <button class="toolbar-btn nav-refresh" id="nav-refresh"
                 title="Refresh" aria-label="Refresh"></button>
+        <button class="toolbar-btn search-btn" id="search-btn" title="Search" hidden></button>
         <nav class="breadcrumb" id="breadcrumb" aria-label="Breadcrumb">
         </nav>
+        <div class="search-bar" id="search-bar" hidden>
+          <input type="text" id="search-input" placeholder="Search documents..."
+                 autocomplete="off" spellcheck="false">
+          <button class="toolbar-btn search-scope-btn" id="search-scope-btn"
+                  title="Search this directory"></button>
+          <button class="search-mode-btn" id="search-mode-btn"
+                  title="Search document contents">Doc</button>
+          <button class="search-cancel" id="search-cancel" title="Cancel">&times;</button>
+        </div>
         <div class="toolbar-actions">
           <button class="toolbar-btn sel-copy-btn" id="sel-copy"
                   title="Copy" disabled></button>
@@ -180,6 +194,8 @@
     <button class="ctx-item ctx-danger" data-action="delete">Delete</button>
     <hr class="ctx-separator">
     <button class="ctx-item" data-action="info">Info</button>
+    <hr class="ctx-separator ctx-search-sep" hidden>
+    <button class="ctx-item" data-action="toggle-search" hidden>Enable Search Indexing</button>
     <hr class="ctx-separator ctx-archive-sep">
     <div class="ctx-item ctx-archive-parent" data-action="create-archive">
       Create Archive &#9656;
