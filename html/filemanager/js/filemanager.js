@@ -1153,7 +1153,8 @@ const WinManager = {
     el.className = 'win' +
       (opts.wide ? ' win-wide' : '') +
       (opts.full ? ' win-full' : '') +
-      (opts.noPadding ? ' win-no-padding' : '');
+      (opts.noPadding ? ' win-no-padding' : '') +
+      (opts.type ? ' win-type-' + opts.type : '');
     el.dataset.winId = id;
 
     var headerTrigger = document.createElement('div');
@@ -1266,6 +1267,38 @@ const WinManager = {
     };
     this._windows.set(id, winState);
 
+    // Viewer mode: start maximized, hide buttons, close = close tab
+    if (this._nextViewerMode) {
+      winState.maximized = true;
+      el.classList.add('win-maximized');
+      minBtn.hidden = true;
+      maxBtn.hidden = true;
+      header.style.cursor = 'default';
+      el.style.resize = 'none';
+      var edges = el.querySelectorAll('.win-edge');
+      for (var ei = 0; ei < edges.length; ei++) edges[ei].hidden = true;
+      // Replace close button entirely to remove old event listeners
+      var newCloseBtn = closeBtn.cloneNode(true);
+      closeBtn.parentNode.replaceChild(newCloseBtn, closeBtn);
+      newCloseBtn.addEventListener('click', function(e) {
+        e.stopPropagation();
+        if (winState.beforeClose) {
+          var ok = winState.beforeClose();
+          if (ok && typeof ok.then === 'function') {
+            ok.then(function(v) {
+              if (v === false) return;
+              window.close();
+              window.location.href = window.location.pathname;
+            });
+            return;
+          }
+          if (ok === false) return;
+        }
+        window.close();
+        window.location.href = window.location.pathname;
+      });
+    }
+
     // Bring to front on click
     el.addEventListener('mousedown', function() { self.focus(id); });
 
@@ -1283,7 +1316,9 @@ const WinManager = {
     this._syncPasteBar();
 
     // Push history state so mobile back button closes this window
-    history.pushState({ win: true }, '', location.hash);
+    if (!this._nextViewerMode) {
+      history.pushState({ win: true }, '', location.hash);
+    }
 
     return id;
   },
@@ -1524,13 +1559,13 @@ const WinManager = {
       if (!win.maximized) return;
       win._headerHideTimer = setTimeout(function() {
         win.headerEl.classList.remove('header-visible');
-      }, 2000);
+      }, 1250);
     });
     win.headerTrigger.addEventListener('mouseleave', function() {
       if (!win.maximized) return;
       win._headerHideTimer = setTimeout(function() {
         win.headerEl.classList.remove('header-visible');
-      }, 2000);
+      }, 1250);
     });
   },
 
@@ -5464,23 +5499,24 @@ const Viewers = {
       }
       if (pluginName) {
         this._openPlugin(item, pluginName);
-        return;
+        return true;
       }
     }
 
     const type = this.getType(item);
-    if (!type) return;
+    if (!type) return false;
 
     switch (type) {
       case 'image': this._openImage(item); break;
       case 'video': this._openVideo(item); break;
       case 'audio': this._openAudio(item); break;
       case 'office': this._openOffice(item); break;
-      case 'pdf': this._openPdf(item); break;
+      case 'pdf': await this._openPdf(item); break;
       case 'epub': await this._openEpub(item); break;
       case 'code': await this._openCode(item); break;
       case 'playlist': this._openPlaylist(item); break;
     }
+    return true;
   },
 
   // adapted from snappygoat.com:
@@ -8558,8 +8594,107 @@ const App = {
     }
   },
 
+  // Minimal viewer mode — open a single file with no file list or sidebar
+  _viewerMode: false,
+  _viewerFile: null,
+
+  _checkViewerMode() {
+    var params = new URLSearchParams(window.location.search);
+    var file = params.get('file');
+    var vnc = params.get('vnc');
+    var term = params.get('term');
+    if (file) {
+      this._viewerMode = true;
+      this._viewerFile = file;
+    } else if (vnc) {
+      this._viewerMode = true;
+      this._viewerVnc = vnc;
+      this._viewerVncPass = params.get('vncpass') || '';
+      this._viewerVncUser = params.get('vncuser') || '';
+    } else if (term) {
+      this._viewerMode = true;
+      this._viewerTerm = term;
+    }
+  },
+
+  async _startViewerMode() {
+    // Hide everything except the loading screen
+    document.getElementById('login-screen').hidden = true;
+    document.getElementById('app').hidden = true;
+    var ls = document.getElementById('loading-screen');
+    if (ls) ls.remove();
+
+    // Set page background
+    document.body.style.background = 'var(--color-bg, #fff)';
+
+    // Need WinManager and Dialog for the viewer windows
+    Dialog.init();
+    WinManager.init();
+
+    // Authenticate
+    if (!Auth.restoreSession() || !(await Auth.verifySession())) {
+      // Not logged in — redirect to main file manager to log in
+      window.location.href = window.location.pathname;
+      return;
+    }
+
+    // Fetch settings for theme
+    try {
+      var settingsResp = await fetch(this.davUrl + '_settings', {credentials: 'same-origin'});
+      var settingsData = await settingsResp.json();
+      if (settingsData.ok) {
+        Auth.admin = !!settingsData.admin;
+        Auth.theme = settingsData.theme || 'auto';
+        Auth.cmTheme = settingsData.cmTheme || 'auto';
+        this.applyTheme(Auth.theme);
+      }
+    } catch(e) {}
+
+    // Tell WinManager to open the next window maximized and in viewer mode
+    WinManager._nextViewerMode = true;
+
+    if (this._viewerVnc) {
+      // VNC mode
+      var parts = this._viewerVnc.split(':');
+      var vncHost = parts[0] || 'localhost';
+      var vncPort = parts[1] || '5900';
+      document.title = 'VNC — ' + vncHost + ':' + vncPort;
+      this._openVncSession(vncHost, vncPort, this._viewerVncPass, this._viewerVncUser);
+    } else if (this._viewerTerm) {
+      // Terminal mode
+      document.title = 'Terminal — ' + this._viewerTerm;
+      this._openTerminalSession(this._viewerTerm);
+    } else {
+      // File viewer mode
+      var href = this._viewerFile;
+      var name = decodeURIComponent(href.substring(href.lastIndexOf('/') + 1));
+      var item = {name: name, href: href, isDir: false};
+      document.title = name + ' - File Manager';
+
+      var opened = await Viewers.open(item);
+      if (!opened) {
+        WinManager._nextViewerMode = false;
+        var a = document.createElement('a');
+        a.href = href;
+        a.download = name;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        return;
+      }
+    }
+
+    WinManager._nextViewerMode = false;
+  },
+
   init() {
     this.davUrl = document.documentElement.dataset.webdavUrl || '/dav/';
+
+    this._checkViewerMode();
+    if (this._viewerMode) {
+      this._startViewerMode();
+      return;
+    }
 
     Dialog.init();
     WinManager.init();
@@ -8987,10 +9122,19 @@ const App = {
       connectBtn.textContent = 'Connect';
       connectBtn.style.marginTop = '8px';
       connectBtn.addEventListener('click', function() {
-        resolve(true);
+        resolve('connect');
+        Dialog.close();
+      });
+      var newTabBtn = document.createElement('button');
+      newTabBtn.className = 'btn btn-primary btn-sm';
+      newTabBtn.textContent = 'Connect and Open in New Tab';
+      newTabBtn.style.marginTop = '8px';
+      newTabBtn.addEventListener('click', function() {
+        resolve('newtab');
         Dialog.close();
       });
       wrap.appendChild(connectBtn);
+      wrap.appendChild(newTabBtn);
       Dialog.open('VNC Remote Desktop', wrap);
     });
 
@@ -9000,6 +9144,14 @@ const App = {
     var port = portInput.value.trim() || '5900';
     var username = userInput.value.trim();
     var password = passInput.value;
+
+    if (confirmed === 'newtab') {
+      var vncParams = '?vnc=' + encodeURIComponent(host) + ':' + encodeURIComponent(port) +
+        (password ? '&vncpass=' + encodeURIComponent(password) : '') +
+        (username ? '&vncuser=' + encodeURIComponent(username) : '');
+      window.open(window.location.pathname + vncParams, '_blank');
+      return;
+    }
 
     this._openVncSession(host, port, password, username);
   },
@@ -9235,6 +9387,10 @@ const App = {
     if (menuH >= maxH) y = 10;
     menu.style.left = x + 'px';
     menu.style.top = y + 'px';
+
+    // Open in New Tab — show for single non-directory items
+    var newTabItem = menu.querySelector('[data-action="open-new-tab"]');
+    newTabItem.hidden = item.isDir || FileList.selected.size > 1;
 
     // Enable/disable paste
     const pasteItem = menu.querySelector('[data-action="paste"]');
@@ -9676,6 +9832,9 @@ const App = {
         } else {
           Viewers.open(item) || this.downloadFile(item);
         }
+        break;
+      case 'open-new-tab':
+        window.open(window.location.pathname + '?file=' + encodeURIComponent(item.href), '_blank');
         break;
       case 'download':
         for (const i of items.filter(i => !i.isDir)) {
@@ -10660,11 +10819,15 @@ const App = {
       input.addEventListener('keydown', function(e) {
         if (e.key === 'Enter') { Dialog._onClose = null; Dialog.close(); resolve(input.value.trim()); }
       });
+      var newTabBtn = document.createElement('button');
+      newTabBtn.className = 'btn btn-primary';
+      newTabBtn.textContent = 'Connect and Open in New Tab';
       cancelBtn.addEventListener('click', function() { Dialog._onClose = null; Dialog.close(); resolve(null); });
       okBtn.addEventListener('click', function() { Dialog._onClose = null; Dialog.close(); resolve(input.value.trim()); });
+      newTabBtn.addEventListener('click', function() { Dialog._onClose = null; Dialog.close(); resolve('newtab:' + input.value.trim()); });
 
       Dialog.open('SSH Host', wrap, {
-        footer: [cancelBtn, okBtn],
+        footer: [cancelBtn, newTabBtn, okBtn],
         onClose: function() { resolve(null); }
       });
       input.focus();
@@ -10672,6 +10835,16 @@ const App = {
     });
 
     if (!host) return;
+    if (host.indexOf('newtab:') === 0) {
+      var termHost = host.substring(7);
+      if (!termHost || termHost.indexOf('@') === -1) {
+        Toast.error('Please include a username (e.g. user@hostname)');
+        return this.openTerminal();
+      }
+      this._saveSSHHost(termHost);
+      window.open(window.location.pathname + '?term=' + encodeURIComponent(termHost), '_blank');
+      return;
+    }
     if (host.indexOf('@') === -1) {
       Toast.error('Please include a username (e.g. user@hostname)');
       return this.openTerminal();

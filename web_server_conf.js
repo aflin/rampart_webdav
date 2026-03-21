@@ -38,6 +38,12 @@ var demoClearTime =   30;             //ten minutes
 var demoMaxFileSize = 50*1024*1024;   //50MB per file
 var demoMaxQuota =    500*1024*1024;  //500MB total
 
+// ONLYOFFICE callback host override.
+// Set this if ONLYOFFICE can't reach the server via host.docker.internal
+// (e.g. when behind a reverse proxy that requires a specific hostname).
+// Example: var onlyOfficeCallbackHost = 'example.com';
+//var onlyOfficeCallbackHost = 'example.com';
+
 //set working directory to the location of this script
 var working_directory = process.scriptPath;
 
@@ -376,6 +382,7 @@ var _oo = rampart.utils;
 global.OO_AVAILABLE = false;
 global.OO_JWT_SECRET = '';
 global.OO_PORT = 0;
+global.OO_CALLBACK_HOST = (typeof onlyOfficeCallbackHost !== 'undefined') ? onlyOfficeCallbackHost : null;
 
 // When running inside Docker (both containers on same compose network),
 // ONLYOFFICE is reachable at http://onlyoffice:80 and Rampart at http://rampart:PORT.

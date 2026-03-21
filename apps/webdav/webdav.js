@@ -1253,7 +1253,14 @@ function pathMoveDir(oldDavRel, newDavRel) {
                     }
                 }
 
-                function doPathScan(fsBase, davRelBase) {
+                function doPathScan(fsBase, davRelBase, _visited) {
+                    if (!_visited) _visited = {};
+                    // Resolve real path to prevent infinite recursion through symlinks
+                    var realDir;
+                    try { realDir = u.realPath(fsBase); } catch(e) { realDir = fsBase; }
+                    if (_visited[realDir]) return;
+                    _visited[realDir] = true;
+
                     var entries;
                     try { entries = u.readdir(fsBase, true); } catch(e) {
                         log("path_scan readdir error for " + davRelBase + ": " + e.message);
@@ -1265,13 +1272,13 @@ function pathMoveDir(oldDavRel, newDavRel) {
                         if (skipName(ename)) continue;
                         var childFs = fsBase + '/' + ename;
                         var childDav = davRelBase.replace(/\/?$/, '/') + ename;
-                        // Use lstat to detect symlinks — don't follow symlink directories
-                        var childLst = u.lstat(childFs);
-                        if (!childLst) continue;
-                        doPathIndex(childDav, childLst.isDirectory);
-                        if (childLst.isDirectory && !childLst.isSymbolicLink) {
+                        // Use stat (follows symlinks) to determine type
+                        var childSt = u.stat(childFs);
+                        if (!childSt) continue;
+                        doPathIndex(childDav, childSt.isDirectory);
+                        if (childSt.isDirectory) {
                             if (isMountPoint(childFs)) continue;
-                            doPathScan(childFs, childDav);
+                            doPathScan(childFs, childDav, _visited);
                         }
                     }
                 }
@@ -4666,9 +4673,14 @@ function main_dispatch(req) {
         // Standalone mode: ONLYOFFICE in Docker reaches host via host.docker.internal
         var ooRampartPort = (global.serverConf && global.serverConf.port > 0) ? global.serverConf.port : 8088;
         var ooDockerScheme = (global.serverConf && global.serverConf.secure) ? 'https://' : 'http://';
-        var ooDockerOrigin = global.OO_DOCKER_MODE
-            ? 'http://rampart:' + ooRampartPort
-            : ooDockerScheme + 'host.docker.internal:' + ooRampartPort;
+        var ooDockerOrigin;
+        if (global.OO_CALLBACK_HOST) {
+            ooDockerOrigin = ooDockerScheme + global.OO_CALLBACK_HOST + (ooRampartPort !== 443 && ooRampartPort !== 80 ? ':' + ooRampartPort : '');
+        } else if (global.OO_DOCKER_MODE) {
+            ooDockerOrigin = 'http://rampart:' + ooRampartPort;
+        } else {
+            ooDockerOrigin = ooDockerScheme + 'host.docker.internal:' + ooRampartPort;
+        }
         var ooFetchUrl = ooDockerOrigin + '/dav/_office/fetch?file='
             + encodeURIComponent(ooFileParam)
             + '&token=' + encodeURIComponent(_ooSignFetchToken(ooDavRel, ooNow));
