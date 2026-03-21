@@ -1,0 +1,16 @@
+# Runtime data
+data/
+logs/
+*.pid
+iroh-*
+
+# Docker runtime files
+docker/docker-compose.yml
+docker/web_server_conf.js
+docker/admin.sh
+docker/data/
+docker/.build.conf
+docker/build/
+
+# Local config
+wsc.js
