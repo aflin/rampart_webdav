@@ -124,7 +124,6 @@
 
 html, body {
   height: 100%;
-  height: 100dvh;
   overflow: hidden;
   font-family: var(--font-family);
   font-size: var(--font-size-base);
@@ -3285,6 +3284,7 @@ tr.drop-target-copy td:last-child::after {
 }
 
 /* Mobile: full-screen app + sidebar overlay at 1024px */
+/* Mobile touch: app layout + sidebar overlay */
 @media (hover: none) and (max-width: 1024px) {
   .app {
     grid-template-columns: 1fr !important;
@@ -3315,7 +3315,10 @@ tr.drop-target-copy td:last-child::after {
   .sidebar-toggle { display: none; }
 
   .main-panel { grid-column: 1; }
+}
 
+/* Tablet/mobile layout: applies to all devices at ≤1024px */
+@media (max-width: 1024px) {
   .breadcrumb { font-size: var(--font-size-xs); }
 
   .toolbar { overflow-x: auto; -webkit-overflow-scrolling: touch; }
