@@ -1567,6 +1567,7 @@ tr.drop-target-copy td:last-child::after {
 
 .win.win-maximized {
   width: 100vw !important;
+  height: 100% !important;
   top: 0 !important;
   left: 0 !important;
   border-radius: 0;
