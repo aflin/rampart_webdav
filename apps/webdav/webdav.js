@@ -55,6 +55,8 @@ if(global.serverConf && global.serverConf.dataRoot) {
     dataRoot=serverConf.dataRoot;
 } else {
     //run from command line.
+    global.indexLock = new rampart.lock();
+    global.thrlock = new rampart.lock();
     dataRoot = findDataRoot();
 }
 // Resolve symlinks so paths match /proc/mounts and other system lookups
@@ -1017,396 +1019,405 @@ function pathMoveDir(oldDavRel, newDavRel) {
     }
 })();
 
-// --- Launch indexing thread ---
-// Initial scans are NOT queued here. They are triggered inside the
-// indexing thread only when tables are first created (empty DB).
-// After that, incremental updates happen via PUT/DELETE/MOVE/COPY hooks
-// and the nightly scheduled index optimization handles the rest.
+if(module && module.exports) {
+    // --- Launch indexing thread ---
+    // Initial scans are NOT queued here. They are triggered inside the
+    // indexing thread only when tables are first created (empty DB).
+    // After that, incremental updates happen via PUT/DELETE/MOVE/COPY hooks
+    // and the nightly scheduled index optimization handles the rest.
 
-// Start the indexing service thread (once per server lifetime)
-(function startIndexService() {
-    indexLock.lock();
-    try {
-        if (rampart.thread.get('indexServiceStarted')) {
-            indexLock.unlock();
-            return;
-        }
-
-        var thr = new rampart.thread();
-        thr.exec(
-            // --- Thread function: runs in dedicated thread ---
-            function(cfg) {
-                var u = rampart.utils;
-                var _Sql = require("rampart-sql");
-                var _totext = require("rampart-totext");
-                var _Lmdb = require("rampart-lmdb");
-
-                // Open our own handles
-                var _db = new _Lmdb.init(cfg.dbPath, true, {conversion: 'JSON', mapSize: 64});
-                var _queueDbi = _db.openDb("indexqueue", true);
-                var _searchDbi = _db.openDb("searchdirs", true);
-
-                var _sql = new _Sql.connection(cfg.searchDbPath, true);
-
-                // Ensure the docs table exists — initial scan on first creation
-                var docsCreated = false;
-                if (!_sql.one("SELECT * FROM SYSTABLES WHERE NAME = ?", ['docs'])) {
-                    _sql.exec(
-                        "CREATE TABLE docs (" +
-                        "  path varchar(512), " +
-                        "  title varchar(255), " +
-                        "  content varchar(1000000), " +
-                        "  mtime int, " +
-                        "  size int" +
-                        ")"
-                    );
-                    _sql.exec(```CREATE FULLTEXT INDEX docs_content_ftx ON docs(content)
-                        WITH WORDEXPRESSIONS (
-                          '[\alnum\x80-\xFF]{2,99}',
-                          '[\alnum\x80-\xFF$<>%@\-_+]{2,99}'
-                        )```);
-                    _sql.exec("CREATE INDEX docs_path_idx ON docs(path)");
-                    try {
-                        _sql.scheduleUpdate('docs_content_ftx', '02:00', 'every day', 1000);
-                        log("Fulltext index update scheduled: daily at 02:00, threshold 1000");
-                    } catch(e) {
-                        log("Failed to schedule fulltext index update: " + e.message);
-                    }
-                    docsCreated = true;
-                }
-
-                // --- Paths table: filename search ---
-                var pathsCreated = false;
-                if (!_sql.one("SELECT * FROM SYSTABLES WHERE NAME = ?", ['paths'])) {
-                    _sql.exec(
-                        "CREATE TABLE paths (" +
-                        "  path varchar(512), " +
-                        "  pathrev varchar(512), " +
-                        "  isdir int" +
-                        ")"
-                    );
-                    _sql.exec("CREATE INDEX paths_path_idx ON paths(path)");
-                    _sql.exec("CREATE INDEX paths_pathrev_idx ON paths(pathrev)");
-                    _sql.exec(```CREATE FULLTEXT INDEX paths_path_ftx ON paths(path)
-                        WITH WORDEXPRESSIONS (
-                          '[\alnum\x80-\xFF]{2,99}'
-                        )```);
-                    try {
-                        _sql.scheduleUpdate('paths_path_ftx', '02:00', 'every day', 1000);
-                    } catch(e) {}
-                    pathsCreated = true;
-                }
-
-                function reversePath(p) {
-                    return p.split('').reverse().join('');
-                }
-
-                var EXTENSIONS = /\.(txt|html?|md|markdown|xml|rtf|tex|latex|csv|json|docx|pptx|xlsx|odt|odp|ods|epub|pdf|doc|srt|vtt)$/i;
-
-                // Skip autosave/temp files
-                function skipName(name) {
-                    if (name.indexOf('.~') === 0) return true;
-                    if (name.charAt(0) === '~' && name.charAt(1) === '$') return true;
-                    return false;
-                }
-
-                // Check if a path is a mount point (different device than parent)
-                function isMountPoint(fsPath) {
-                    try {
-                        var mpStat = u.stat(fsPath);
-                        if (!mpStat || !mpStat.isDirectory) return false;
-                        var parentDir = fsPath.replace(/\/[^\/]+\/?$/, '') || '/';
-                        var parentStat = u.stat(parentDir);
-                        if (!parentStat) return false;
-                        return mpStat.dev !== parentStat.dev;
-                    } catch(e) { return false; }
-                }
-
-                function log(msg) {
-                    u.fprintf(cfg.logFile, true, "%s %s\n", new Date().toISOString(), msg);
-                }
-
-                // Index a single file
-                function doIndex(fsPath, davRelPath) {
-                    if (!EXTENSIONS.test(fsPath)) return;
-                    var fsStat = u.stat(fsPath);
-                    if (!fsStat || fsStat.isDirectory || fsStat.size === 0) return;
-
-                    // Check if already indexed with same mtime
-                    var existing = _sql.one("SELECT mtime FROM docs WHERE path = ?", [davRelPath]);
-                    if (existing && existing.mtime === Math.floor(fsStat.mtime / 1000)) return;
-
-                    var text;
-                    try {
-                        text = _totext.convertFile(fsPath);
-                    } catch(e) {
-                        log("totext error for " + davRelPath + ": " + e.message);
-                        return;
-                    }
-                    if (!text || !text.length) return;
-
-                    var title = fsPath.substring(fsPath.lastIndexOf('/') + 1);
-                    var dotIdx = title.lastIndexOf('.');
-                    if (dotIdx > 0) title = title.substring(0, dotIdx);
-
-                    var res = _sql.exec("DELETE FROM docs WHERE path = ?", [davRelPath]);
-                    _sql.exec("INSERT INTO docs VALUES (?, ?, ?, ?, ?)",
-                        [davRelPath, title, text, Math.floor(fsStat.mtime / 1000), fsStat.size]);
-                }
-
-                // Recursively scan and index a directory
-                function doScan(fsBase, davRelBase) {
-                    var entries;
-                    try { entries = u.readdir(fsBase, true); } catch(e) {
-                        log("scan readdir error for " + davRelBase + ": " + e.message);
-                        return;
-                    }
-                    for (var i = 0; i < entries.length; i++) {
-                        var ename = entries[i];
-                        if (ename === '.' || ename === '..') continue;
-                        if (ename.indexOf('.~') === 0 || (ename.charAt(0) === '~' && ename.charAt(1) === '$')) continue;
-                        var childFs = fsBase + '/' + ename;
-                        var childDav = davRelBase.replace(/\/?$/, '/') + ename;
-                        var childSt = u.stat(childFs);
-                        if (!childSt) continue;
-                        if (childSt.isDirectory) {
-                            doScan(childFs, childDav);
-                        } else {
-                            doIndex(childFs, childDav);
-                        }
-                    }
-                }
-
-                function doDelete(davRelPath) {
-                    var res = _sql.exec("DELETE FROM docs WHERE path = ?", [davRelPath]);
-                    if (res.rowCount === 0) log("delete: no match for " + davRelPath);
-                }
-
-                function doDeleteDir(davRelPath) {
-                    var prefix = davRelPath.replace(/\/?$/, '/');
-                    _sql.exec("DELETE FROM docs WHERE path MATCHES ?", [prefix + '%']);
-                }
-
-                function doMove(oldPath, newPath) {
-                    var res = _sql.exec("UPDATE docs SET path = ? WHERE path = ?", [newPath, oldPath]);
-                    if (res.rowCount === 0) log("move: no match for " + oldPath);
-                }
-
-                function doMoveDir(oldPath, newPath) {
-                    var oldPrefix = oldPath.replace(/\/?$/, '/');
-                    var newPrefix = newPath.replace(/\/?$/, '/');
-                    var rows = _sql.exec("SELECT path FROM docs WHERE path MATCHES ?", {maxRows: 100000}, [oldPrefix + '%']);
-                    if (rows.rows) {
-                        for (var i = 0; i < rows.rows.length; i++) {
-                            var op = rows.rows[i].path;
-                            var np = newPrefix + op.substring(oldPrefix.length);
-                            _sql.exec("UPDATE docs SET path = ? WHERE path = ?", [np, op]);
-                        }
-                    }
-                }
-
-                // --- Path index operations ---
-
-                function doPathIndex(davRelPath, isDir) {
-                    // Delete old entry if exists
-                    _sql.exec("DELETE FROM paths WHERE path = ?", [davRelPath]);
-                    _sql.exec("INSERT INTO paths VALUES (?, ?, ?)",
-                        [davRelPath, reversePath(davRelPath), isDir ? 1 : 0]);
-                }
-
-                function doPathDelete(davRelPath) {
-                    _sql.exec("DELETE FROM paths WHERE path = ?", [davRelPath]);
-                }
-
-                function doPathDeleteDir(davRelPath) {
-                    var prefix = davRelPath.replace(/\/?$/, '/');
-                    _sql.exec("DELETE FROM paths WHERE path = ?", [davRelPath]);
-                    _sql.exec("DELETE FROM paths WHERE path MATCHES ?", [prefix + '%']);
-                }
-
-                function doPathMove(oldPath, newPath) {
-                    _sql.exec("DELETE FROM paths WHERE path = ?", [oldPath]);
-                    // Check if it's a dir
-                    var existing = _sql.one("SELECT isdir FROM paths WHERE path = ?", [oldPath]);
-                    var isDir = existing ? existing.isdir : 0;
-                    // Just re-insert with new path (since pathrev also changes)
-                    _sql.exec("INSERT INTO paths VALUES (?, ?, ?)",
-                        [newPath, reversePath(newPath), isDir]);
-                }
-
-                function doPathMoveDir(oldPath, newPath) {
-                    var oldPrefix = oldPath.replace(/\/?$/, '/');
-                    var newPrefix = newPath.replace(/\/?$/, '/');
-                    // Move the directory entry itself
-                    _sql.exec("DELETE FROM paths WHERE path = ?", [oldPath]);
-                    _sql.exec("INSERT INTO paths VALUES (?, ?, ?)", [newPath, reversePath(newPath), 1]);
-                    // Move all children
-                    var rows = _sql.exec("SELECT path, isdir FROM paths WHERE path MATCHES ?", {maxRows: 100000}, [oldPrefix + '%']);
-                    if (rows.rows) {
-                        for (var i = 0; i < rows.rows.length; i++) {
-                            var op = rows.rows[i].path;
-                            var np = newPrefix + op.substring(oldPrefix.length);
-                            _sql.exec("DELETE FROM paths WHERE path = ?", [op]);
-                            _sql.exec("INSERT INTO paths VALUES (?, ?, ?)",
-                                [np, reversePath(np), rows.rows[i].isdir]);
-                        }
-                    }
-                }
-
-                function doPathScan(fsBase, davRelBase, _visited) {
-                    if (!_visited) _visited = {};
-                    // Resolve real path to prevent infinite recursion through symlinks
-                    var realDir;
-                    try { realDir = u.realPath(fsBase); } catch(e) { realDir = fsBase; }
-                    if (_visited[realDir]) return;
-                    _visited[realDir] = true;
-
-                    var entries;
-                    try { entries = u.readdir(fsBase, true); } catch(e) {
-                        log("path_scan readdir error for " + davRelBase + ": " + e.message);
-                        return;
-                    }
-                    for (var i = 0; i < entries.length; i++) {
-                        var ename = entries[i];
-                        if (ename === '.' || ename === '..') continue;
-                        if (skipName(ename)) continue;
-                        var childFs = fsBase + '/' + ename;
-                        var childDav = davRelBase.replace(/\/?$/, '/') + ename;
-                        // Use stat (follows symlinks) to determine type
-                        var childSt = u.stat(childFs);
-                        if (!childSt) continue;
-                        doPathIndex(childDav, childSt.isDirectory);
-                        if (childSt.isDirectory) {
-                            if (isMountPoint(childFs)) continue;
-                            doPathScan(childFs, childDav, _visited);
-                        }
-                    }
-                }
-
-                log("Index service started");
-
-                // Initial scans — only on first-time table creation
-                if (docsCreated) {
-                    log("First run: scanning indexed directories for document content");
-                    var _searchDirs = _db.get(_searchDbi, "", 10000);
-                    if (_searchDirs) {
-                        var _sdKeys = Object.keys(_searchDirs);
-                        for (var _sdi = 0; _sdi < _sdKeys.length; _sdi++) {
-                            if (_searchDirs[_sdKeys[_sdi]] && _searchDirs[_sdKeys[_sdi]].enabled) {
-                                var _sdFs = cfg.davRoot + _sdKeys[_sdi];
-                                if (u.stat(_sdFs)) {
-                                    log("Scanning docs: " + _sdKeys[_sdi]);
-                                    doScan(_sdFs, _sdKeys[_sdi]);
-                                }
-                            }
-                        }
-                    }
-                    try { _sql.exec("ALTER INDEX docs_content_ftx OPTIMIZE HAVING COUNT(NewRows) > 0"); } catch(e) {}
-                    log("Document content scan complete");
-                }
-                if (pathsCreated) {
-                    log("First run: scanning all paths");
-                    doPathScan(cfg.davRoot, '');
-                    try { _sql.exec("ALTER INDEX paths_path_ftx OPTIMIZE HAVING COUNT(NewRows) > 0"); } catch(e) {}
-                    log("Path scan complete");
-                }
-
-                // Main loop: process tasks from queue
-                while (true) {
-                    var tasks = _db.get(_queueDbi, "", 100);
-                    var processed = 0;
-
-                    if (tasks && typeof tasks === 'object') {
-                        var keys = Object.keys(tasks).sort(); // ASCII sort = time order
-                        for (var ki = 0; ki < keys.length; ki++) {
-                            var task = tasks[keys[ki]];
-                            try {
-                                switch (task.op) {
-                                    case 'index':
-                                        doIndex(task.fsPath, task.davRelPath);
-                                        break;
-                                    case 'delete':
-                                        doDelete(task.davRelPath);
-                                        break;
-                                    case 'deletedir':
-                                        doDeleteDir(task.davRelPath);
-                                        break;
-                                    case 'move':
-                                        doMove(task.oldPath, task.newPath);
-                                        break;
-                                    case 'movedir':
-                                        doMoveDir(task.oldPath, task.newPath);
-                                        break;
-                                    case 'scan':
-                                        doScan(task.fsPath, task.davRelPath);
-                                        break;
-                                    case 'path_index':
-                                        doPathIndex(task.davRelPath, task.isDir);
-                                        break;
-                                    case 'path_delete':
-                                        doPathDelete(task.davRelPath);
-                                        break;
-                                    case 'path_deletedir':
-                                        doPathDeleteDir(task.davRelPath);
-                                        break;
-                                    case 'path_move':
-                                        doPathMove(task.oldPath, task.newPath);
-                                        break;
-                                    case 'path_movedir':
-                                        doPathMoveDir(task.oldPath, task.newPath);
-                                        break;
-                                    case 'path_scan':
-                                        doPathScan(task.fsPath, task.davRelPath);
-                                        break;
-                                    default:
-                                        log("unknown task op: " + task.op);
-                                }
-                            } catch(e) {
-                                log("task error (" + task.op + " " + (task.davRelPath || task.oldPath || '') + "): " + e.message);
-                            }
-                            // Delete completed task
-                            _db.del(_queueDbi, keys[ki]);
-                            processed++;
-                        }
-                    }
-
-                    // Sleep if no tasks were processed
-                    if (processed === 0) {
-                        u.sleep(2);
-                    }
-                }
-            },
-            // --- Thread argument ---
-            {
-                dbPath: DB_PATH,
-                searchDbPath: SEARCH_DB_PATH,
-                logFile: SEARCH_LOG,
-                davRoot: DAV_ROOT
-            },
-            // --- Callback: runs in the calling thread's event loop on error ---
-            function(value, error) {
-                if (error) {
-                    fprintf(stderr, "Index service crashed: %s\n", error.message || error);
-                    try {
-                        fprintf(SEARCH_LOG, true, "%s Index service crashed: %s\n",
-                            new Date().toISOString(), error.message || error);
-                    } catch(e) {}
-                    rampart.thread.put('indexServiceStarted', false);
-                    // Touch webdav.js to trigger module reload on next request
-                    try {
-                        touch(serverConf.appsRoot + '/webdav/webdav.js');
-                    } catch(e) {}
-                }
+    // Start the indexing service thread (once per server lifetime)
+    (function startIndexService() {
+        indexLock.lock();
+        try {
+            if (rampart.thread.get('indexServiceStarted')) {
+                indexLock.unlock();
+                return;
             }
-        );
 
-        rampart.thread.put('indexServiceStarted', true);
-        indexLock.unlock();
-    } catch(e) {
-        indexLock.unlock();
-        fprintf(stderr, "Failed to start index service: %s\n", e.message || e);
-    }
-})();
+            var thr = new rampart.thread();
+            thr.exec(
+                // --- Thread function: runs in dedicated thread ---
+                function(cfg) {
+                    var u = rampart.utils;
+                    var _Sql = require("rampart-sql");
+                    var _totext = require("rampart-totext");
+                    var _Lmdb = require("rampart-lmdb");
+
+                    if(!cfg.logFile)
+                        cfg.logFile = serverConf.serverRoot + '/logs/index.log';
+
+                    var logdir = cfg.logFile.replace(/[^/]+$/, '');
+                    if(!stat(logdir))
+                        mkdir(logdir,true);
+
+                    // Open our own handles
+                    var _db = new _Lmdb.init(cfg.dbPath, true, {conversion: 'JSON', mapSize: 64});
+                    var _queueDbi = _db.openDb("indexqueue", true);
+                    var _searchDbi = _db.openDb("searchdirs", true);
+
+                    var _sql = new _Sql.connection(cfg.searchDbPath, true);
+
+                    // Ensure the docs table exists — initial scan on first creation
+                    var docsCreated = false;
+                    if (!_sql.one("SELECT * FROM SYSTABLES WHERE NAME = ?", ['docs'])) {
+                        _sql.exec(
+                            "CREATE TABLE docs (" +
+                            "  path varchar(512), " +
+                            "  title varchar(255), " +
+                            "  content varchar(1000000), " +
+                            "  mtime int, " +
+                            "  size int" +
+                            ")"
+                        );
+                        _sql.exec(```CREATE FULLTEXT INDEX docs_content_ftx ON docs(content)
+                            WITH WORDEXPRESSIONS (
+                              '[\alnum\x80-\xFF]{2,99}',
+                              '[\alnum\x80-\xFF$<>%@\-_+]{2,99}'
+                            )```);
+                        _sql.exec("CREATE INDEX docs_path_idx ON docs(path)");
+                        try {
+                            _sql.scheduleUpdate('docs_content_ftx', '02:00', 'every day', 1000);
+                            log("Fulltext index update scheduled: daily at 02:00, threshold 1000");
+                        } catch(e) {
+                            log("Failed to schedule fulltext index update: " + e.message);
+                        }
+                        docsCreated = true;
+                    }
+
+                    // --- Paths table: filename search ---
+                    var pathsCreated = false;
+                    if (!_sql.one("SELECT * FROM SYSTABLES WHERE NAME = ?", ['paths'])) {
+                        _sql.exec(
+                            "CREATE TABLE paths (" +
+                            "  path varchar(512), " +
+                            "  pathrev varchar(512), " +
+                            "  isdir int" +
+                            ")"
+                        );
+                        _sql.exec("CREATE INDEX paths_path_idx ON paths(path)");
+                        _sql.exec("CREATE INDEX paths_pathrev_idx ON paths(pathrev)");
+                        _sql.exec(```CREATE FULLTEXT INDEX paths_path_ftx ON paths(path)
+                            WITH WORDEXPRESSIONS (
+                              '[\alnum\x80-\xFF]{2,99}'
+                            )```);
+                        try {
+                            _sql.scheduleUpdate('paths_path_ftx', '02:00', 'every day', 1000);
+                        } catch(e) {}
+                        pathsCreated = true;
+                    }
+
+                    function reversePath(p) {
+                        return p.split('').reverse().join('');
+                    }
+
+                    var EXTENSIONS = /\.(txt|html?|md|markdown|xml|rtf|tex|latex|csv|json|docx|pptx|xlsx|odt|odp|ods|epub|pdf|doc|srt|vtt)$/i;
+
+                    // Skip autosave/temp files
+                    function skipName(name) {
+                        if (name.indexOf('.~') === 0) return true;
+                        if (name.charAt(0) === '~' && name.charAt(1) === '$') return true;
+                        return false;
+                    }
+
+                    // Check if a path is a mount point (different device than parent)
+                    function isMountPoint(fsPath) {
+                        try {
+                            var mpStat = u.stat(fsPath);
+                            if (!mpStat || !mpStat.isDirectory) return false;
+                            var parentDir = fsPath.replace(/\/[^\/]+\/?$/, '') || '/';
+                            var parentStat = u.stat(parentDir);
+                            if (!parentStat) return false;
+                            return mpStat.dev !== parentStat.dev;
+                        } catch(e) { return false; }
+                    }
+
+                    function log(msg) {
+                        u.fprintf(cfg.logFile, true, "%s %s\n", new Date().toISOString(), msg);
+                    }
+
+                    // Index a single file
+                    function doIndex(fsPath, davRelPath) {
+                        if (!EXTENSIONS.test(fsPath)) return;
+                        var fsStat = u.stat(fsPath);
+                        if (!fsStat || fsStat.isDirectory || fsStat.size === 0) return;
+
+                        // Check if already indexed with same mtime
+                        var existing = _sql.one("SELECT mtime FROM docs WHERE path = ?", [davRelPath]);
+                        if (existing && existing.mtime === Math.floor(fsStat.mtime / 1000)) return;
+
+                        var text;
+                        try {
+                            text = _totext.convertFile(fsPath);
+                        } catch(e) {
+                            log("totext error for " + davRelPath + ": " + e.message);
+                            return;
+                        }
+                        if (!text || !text.length) return;
+
+                        var title = fsPath.substring(fsPath.lastIndexOf('/') + 1);
+                        var dotIdx = title.lastIndexOf('.');
+                        if (dotIdx > 0) title = title.substring(0, dotIdx);
+
+                        var res = _sql.exec("DELETE FROM docs WHERE path = ?", [davRelPath]);
+                        _sql.exec("INSERT INTO docs VALUES (?, ?, ?, ?, ?)",
+                            [davRelPath, title, text, Math.floor(fsStat.mtime / 1000), fsStat.size]);
+                    }
+
+                    // Recursively scan and index a directory
+                    function doScan(fsBase, davRelBase) {
+                        var entries;
+                        try { entries = u.readdir(fsBase, true); } catch(e) {
+                            log("scan readdir error for " + davRelBase + ": " + e.message);
+                            return;
+                        }
+                        for (var i = 0; i < entries.length; i++) {
+                            var ename = entries[i];
+                            if (ename === '.' || ename === '..') continue;
+                            if (ename.indexOf('.~') === 0 || (ename.charAt(0) === '~' && ename.charAt(1) === '$')) continue;
+                            var childFs = fsBase + '/' + ename;
+                            var childDav = davRelBase.replace(/\/?$/, '/') + ename;
+                            var childSt = u.stat(childFs);
+                            if (!childSt) continue;
+                            if (childSt.isDirectory) {
+                                doScan(childFs, childDav);
+                            } else {
+                                doIndex(childFs, childDav);
+                            }
+                        }
+                    }
+
+                    function doDelete(davRelPath) {
+                        var res = _sql.exec("DELETE FROM docs WHERE path = ?", [davRelPath]);
+                        if (res.rowCount === 0) log("delete: no match for " + davRelPath);
+                    }
+
+                    function doDeleteDir(davRelPath) {
+                        var prefix = davRelPath.replace(/\/?$/, '/');
+                        _sql.exec("DELETE FROM docs WHERE path MATCHES ?", [prefix + '%']);
+                    }
+
+                    function doMove(oldPath, newPath) {
+                        var res = _sql.exec("UPDATE docs SET path = ? WHERE path = ?", [newPath, oldPath]);
+                        if (res.rowCount === 0) log("move: no match for " + oldPath);
+                    }
+
+                    function doMoveDir(oldPath, newPath) {
+                        var oldPrefix = oldPath.replace(/\/?$/, '/');
+                        var newPrefix = newPath.replace(/\/?$/, '/');
+                        var rows = _sql.exec("SELECT path FROM docs WHERE path MATCHES ?", {maxRows: 100000}, [oldPrefix + '%']);
+                        if (rows.rows) {
+                            for (var i = 0; i < rows.rows.length; i++) {
+                                var op = rows.rows[i].path;
+                                var np = newPrefix + op.substring(oldPrefix.length);
+                                _sql.exec("UPDATE docs SET path = ? WHERE path = ?", [np, op]);
+                            }
+                        }
+                    }
+
+                    // --- Path index operations ---
+
+                    function doPathIndex(davRelPath, isDir) {
+                        // Delete old entry if exists
+                        _sql.exec("DELETE FROM paths WHERE path = ?", [davRelPath]);
+                        _sql.exec("INSERT INTO paths VALUES (?, ?, ?)",
+                            [davRelPath, reversePath(davRelPath), isDir ? 1 : 0]);
+                    }
+
+                    function doPathDelete(davRelPath) {
+                        _sql.exec("DELETE FROM paths WHERE path = ?", [davRelPath]);
+                    }
+
+                    function doPathDeleteDir(davRelPath) {
+                        var prefix = davRelPath.replace(/\/?$/, '/');
+                        _sql.exec("DELETE FROM paths WHERE path = ?", [davRelPath]);
+                        _sql.exec("DELETE FROM paths WHERE path MATCHES ?", [prefix + '%']);
+                    }
+
+                    function doPathMove(oldPath, newPath) {
+                        _sql.exec("DELETE FROM paths WHERE path = ?", [oldPath]);
+                        // Check if it's a dir
+                        var existing = _sql.one("SELECT isdir FROM paths WHERE path = ?", [oldPath]);
+                        var isDir = existing ? existing.isdir : 0;
+                        // Just re-insert with new path (since pathrev also changes)
+                        _sql.exec("INSERT INTO paths VALUES (?, ?, ?)",
+                            [newPath, reversePath(newPath), isDir]);
+                    }
+
+                    function doPathMoveDir(oldPath, newPath) {
+                        var oldPrefix = oldPath.replace(/\/?$/, '/');
+                        var newPrefix = newPath.replace(/\/?$/, '/');
+                        // Move the directory entry itself
+                        _sql.exec("DELETE FROM paths WHERE path = ?", [oldPath]);
+                        _sql.exec("INSERT INTO paths VALUES (?, ?, ?)", [newPath, reversePath(newPath), 1]);
+                        // Move all children
+                        var rows = _sql.exec("SELECT path, isdir FROM paths WHERE path MATCHES ?", {maxRows: 100000}, [oldPrefix + '%']);
+                        if (rows.rows) {
+                            for (var i = 0; i < rows.rows.length; i++) {
+                                var op = rows.rows[i].path;
+                                var np = newPrefix + op.substring(oldPrefix.length);
+                                _sql.exec("DELETE FROM paths WHERE path = ?", [op]);
+                                _sql.exec("INSERT INTO paths VALUES (?, ?, ?)",
+                                    [np, reversePath(np), rows.rows[i].isdir]);
+                            }
+                        }
+                    }
+
+                    function doPathScan(fsBase, davRelBase, _visited) {
+                        if (!_visited) _visited = {};
+                        // Resolve real path to prevent infinite recursion through symlinks
+                        var realDir;
+                        try { realDir = u.realPath(fsBase); } catch(e) { realDir = fsBase; }
+                        if (_visited[realDir]) return;
+                        _visited[realDir] = true;
+
+                        var entries;
+                        try { entries = u.readdir(fsBase, true); } catch(e) {
+                            log("path_scan readdir error for " + davRelBase + ": " + e.message);
+                            return;
+                        }
+                        for (var i = 0; i < entries.length; i++) {
+                            var ename = entries[i];
+                            if (ename === '.' || ename === '..') continue;
+                            if (skipName(ename)) continue;
+                            var childFs = fsBase + '/' + ename;
+                            var childDav = davRelBase.replace(/\/?$/, '/') + ename;
+                            // Use stat (follows symlinks) to determine type
+                            var childSt = u.stat(childFs);
+                            if (!childSt) continue;
+                            doPathIndex(childDav, childSt.isDirectory);
+                            if (childSt.isDirectory) {
+                                if (isMountPoint(childFs)) continue;
+                                doPathScan(childFs, childDav, _visited);
+                            }
+                        }
+                    }
+
+                    log("Index service started");
+
+                    // Initial scans — only on first-time table creation
+                    if (docsCreated) {
+                        log("First run: scanning indexed directories for document content");
+                        var _searchDirs = _db.get(_searchDbi, "", 10000);
+                        if (_searchDirs) {
+                            var _sdKeys = Object.keys(_searchDirs);
+                            for (var _sdi = 0; _sdi < _sdKeys.length; _sdi++) {
+                                if (_searchDirs[_sdKeys[_sdi]] && _searchDirs[_sdKeys[_sdi]].enabled) {
+                                    var _sdFs = cfg.davRoot + _sdKeys[_sdi];
+                                    if (u.stat(_sdFs)) {
+                                        log("Scanning docs: " + _sdKeys[_sdi]);
+                                        doScan(_sdFs, _sdKeys[_sdi]);
+                                    }
+                                }
+                            }
+                        }
+                        try { _sql.exec("ALTER INDEX docs_content_ftx OPTIMIZE HAVING COUNT(NewRows) > 0"); } catch(e) {}
+                        log("Document content scan complete");
+                    }
+                    if (pathsCreated) {
+                        log("First run: scanning all paths");
+                        doPathScan(cfg.davRoot, '');
+                        try { _sql.exec("ALTER INDEX paths_path_ftx OPTIMIZE HAVING COUNT(NewRows) > 0"); } catch(e) {}
+                        log("Path scan complete");
+                    }
+
+                    // Main loop: process tasks from queue
+                    while (true) {
+                        var tasks = _db.get(_queueDbi, "", 100);
+                        var processed = 0;
+
+                        if (tasks && typeof tasks === 'object') {
+                            var keys = Object.keys(tasks).sort(); // ASCII sort = time order
+                            for (var ki = 0; ki < keys.length; ki++) {
+                                var task = tasks[keys[ki]];
+                                try {
+                                    switch (task.op) {
+                                        case 'index':
+                                            doIndex(task.fsPath, task.davRelPath);
+                                            break;
+                                        case 'delete':
+                                            doDelete(task.davRelPath);
+                                            break;
+                                        case 'deletedir':
+                                            doDeleteDir(task.davRelPath);
+                                            break;
+                                        case 'move':
+                                            doMove(task.oldPath, task.newPath);
+                                            break;
+                                        case 'movedir':
+                                            doMoveDir(task.oldPath, task.newPath);
+                                            break;
+                                        case 'scan':
+                                            doScan(task.fsPath, task.davRelPath);
+                                            break;
+                                        case 'path_index':
+                                            doPathIndex(task.davRelPath, task.isDir);
+                                            break;
+                                        case 'path_delete':
+                                            doPathDelete(task.davRelPath);
+                                            break;
+                                        case 'path_deletedir':
+                                            doPathDeleteDir(task.davRelPath);
+                                            break;
+                                        case 'path_move':
+                                            doPathMove(task.oldPath, task.newPath);
+                                            break;
+                                        case 'path_movedir':
+                                            doPathMoveDir(task.oldPath, task.newPath);
+                                            break;
+                                        case 'path_scan':
+                                            doPathScan(task.fsPath, task.davRelPath);
+                                            break;
+                                        default:
+                                            log("unknown task op: " + task.op);
+                                    }
+                                } catch(e) {
+                                    log("task error (" + task.op + " " + (task.davRelPath || task.oldPath || '') + "): " + e.message);
+                                }
+                                // Delete completed task
+                                _db.del(_queueDbi, keys[ki]);
+                                processed++;
+                            }
+                        }
+
+                        // Sleep if no tasks were processed
+                        if (processed === 0) {
+                            u.sleep(2);
+                        }
+                    }
+                },
+                // --- Thread argument ---
+                {
+                    dbPath: DB_PATH,
+                    searchDbPath: SEARCH_DB_PATH,
+                    logFile: SEARCH_LOG,
+                    davRoot: DAV_ROOT
+                },
+                // --- Callback: runs in the calling thread's event loop on error ---
+                function(value, error) {
+                    if (error) {
+                        fprintf(stderr, "Index service crashed: %s\n", error.message || error);
+                        try {
+                            fprintf(SEARCH_LOG, true, "%s Index service crashed: %s\n",
+                                new Date().toISOString(), error.message || error);
+                        } catch(e) {}
+                        rampart.thread.put('indexServiceStarted', false);
+                        // Touch webdav.js to trigger module reload on next request
+                        try {
+                            touch(serverConf.appsRoot + '/webdav/webdav.js');
+                        } catch(e) {}
+                    }
+                }
+            );
+
+            rampart.thread.put('indexServiceStarted', true);
+            indexLock.unlock();
+        } catch(e) {
+            indexLock.unlock();
+            fprintf(stderr, "Failed to start index service: %s\n", e.message || e);
+        }
+    })();
+}// module.exports
 
 // --- Search query (runs in server threads, reads from Texis DB) ---
 
