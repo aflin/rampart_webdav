@@ -4916,7 +4916,12 @@ function main_dispatch(req) {
                 demoClearTime: DEMO_MODE ? DEMO_CLEAR_TIME : 0,
                 searchDirs: searchGetUserDirs(settingsUser.username, settingsUser.admin),
                 themes: (function() {
-                    var themesDir = (serverConf.htmlRoot || (process.scriptPath + '/html')) + '/filemanager/css/themes';
+                    // Derive the app's filesystem path from the Referer header
+                    var htmlRoot = serverConf.htmlRoot || (process.scriptPath + '/html');
+                    var referer = getHeader(req.headers, 'Referer') || '';
+                    var refPath = referer.replace(/^https?:\/\/[^\/]+/, '').replace(/[?#].*/, '').replace(/\/[^\/]*$/, '');
+                    if (!refPath || refPath === '/') refPath = '/filemanager';
+                    var themesDir = htmlRoot + refPath + '/css/themes';
                     var themes = [];
                     try {
                         var files = readdir(themesDir);

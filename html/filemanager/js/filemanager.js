@@ -20,7 +20,9 @@
 /* -----------------------------------------------------------------------
  * CDN URLs — set useLocalScripts=true in index.html to use local copies
  * ----------------------------------------------------------------------- */
-const _L = '/filemanager/js/local/';
+// Derive base path from the current page location (e.g. /filemanager/ or /myapp/)
+const _BASE = window.location.pathname.replace(/\/[^\/]*$/, '') || '';
+const _L = _BASE + '/js/local/';
 const CDN = (typeof useLocalScripts !== 'undefined' && useLocalScripts) ? {
   jsmediatags:       _L + 'jsmediatags.min.js',
   videojsCss:        _L + 'video-js.min.css',
