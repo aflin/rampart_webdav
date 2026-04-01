@@ -257,6 +257,9 @@ module.exports = {
             '  return s;\n' +
             '}\n' +
             '\n' +
+            '// Track active row\n' +
+            'var activeRow = -1;\n' +
+            '\n' +
             '// Cell editing\n' +
             'document.getElementById("csv-table").addEventListener("input", function(e) {\n' +
             '  if (e.target.tagName === "TD" && e.target.dataset.r !== undefined) {\n' +
@@ -264,6 +267,11 @@ module.exports = {
             '    setDirty();\n' +
             '  }\n' +
             '});\n' +
+            'document.getElementById("csv-table").addEventListener("focus", function(e) {\n' +
+            '  if (e.target.tagName === "TD" && e.target.dataset.r !== undefined) {\n' +
+            '    activeRow = parseInt(e.target.dataset.r);\n' +
+            '  }\n' +
+            '}, true);\n' +
             '\n' +
             '// Column sorting\n' +
             'document.getElementById("csv-table").addEventListener("click", function(e) {\n' +
@@ -309,7 +317,12 @@ module.exports = {
             'if (document.getElementById("del-row-btn")) {\n' +
             '  document.getElementById("del-row-btn").addEventListener("click", function() {\n' +
             '    if (DATA.rows.length === 0) return;\n' +
-            '    DATA.rows.pop();\n' +
+            '    if (activeRow >= 0 && activeRow < DATA.rows.length) {\n' +
+            '      DATA.rows.splice(activeRow, 1);\n' +
+            '      if (activeRow >= DATA.rows.length) activeRow = DATA.rows.length - 1;\n' +
+            '    } else {\n' +
+            '      DATA.rows.pop();\n' +
+            '    }\n' +
             '    setDirty();\n' +
             '    renderTable();\n' +
             '  });\n' +
