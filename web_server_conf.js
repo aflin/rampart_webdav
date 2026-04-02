@@ -226,6 +226,10 @@ var serverConf = {
     /* connectTimeout      Number. Max time to wait for client send request in seconds (default 20)   */
     //connectTimeout:      20,
 
+    /* maxBodySize         Number. Max request body size in bytes. Returns 413 if exceeded.
+                                   For websockets, limits single message size. Default 52428800 (50MB) */
+    //maxBodySize:         52428800,
+
     /* quickserver         Bool.   whether to load the alternate quickserver setting which serves
                                    files from serverRoot only and no apps or wsapps unless
                                    explicity set                                                    */
@@ -354,11 +358,11 @@ global.DEMO_MAX_FILE_SIZE = demoMaxFileSize;
 global.DEMO_MAX_QUOTA = demoMaxQuota;
 
 if (demoMode) {
-    serverConf.dataRoot = working_directory + '/demo-data';
-    if (!rampart.utils.stat(serverConf.dataRoot)) {
-        rampart.utils.mkdir(serverConf.dataRoot);
+    global.DEMO_DATA_ROOT = working_directory + '/demo-data';
+    if (!rampart.utils.stat(global.DEMO_DATA_ROOT)) {
+        rampart.utils.mkdir(global.DEMO_DATA_ROOT);
         if (serverConf.user) {
-            try { rampart.utils.chown({user: serverConf.user, path: serverConf.dataRoot}); } catch(e) {}
+            try { rampart.utils.chown({user: serverConf.user, path: global.DEMO_DATA_ROOT}); } catch(e) {}
         }
     }
     rampart.utils.printf("DEMO MODE enabled (wipe interval: %ds, max file: %dMB, quota: %dMB)\n",

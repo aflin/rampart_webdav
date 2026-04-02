@@ -2495,7 +2495,6 @@ const Search = {
     bar.hidden = false;
     var input = document.getElementById('search-input');
     input.value = '';
-    this._filenameMode = true;
     this._updatePlaceholder();
     if (this._updateModeBtn) this._updateModeBtn();
     input.focus();
@@ -8762,10 +8761,10 @@ const App = {
         }
       }
 
-      if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT') return;
+      if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT' || e.target.isContentEditable) return;
 
-      // '/' key opens search bar
-      if (e.key === '/') {
+      // '/' key opens search bar — only when no window is focused
+      if (e.key === '/' && !WinManager.getFocusedWindow()) {
         e.preventDefault();
         Search.showInput();
         return;
@@ -8978,8 +8977,8 @@ const App = {
     if (ls) ls.remove();
     document.getElementById('login-screen').hidden = false;
     document.getElementById('app').hidden = true;
-    document.getElementById('login-user').value = '';
-    document.getElementById('login-pass').value = '';
+    document.getElementById('login-user').value = (typeof demoCredentials !== 'undefined' && demoCredentials.user) || '';
+    document.getElementById('login-pass').value = (typeof demoCredentials !== 'undefined' && demoCredentials.pass) || '';
     document.getElementById('login-error').textContent = '';
     document.title = 'File Manager';
 

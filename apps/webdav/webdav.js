@@ -15,6 +15,7 @@ var curl = require("rampart-curl");
 var server = require("rampart-server");
 var Sql = require("rampart-sql");
 var totext = require("rampart-totext");
+var net = require("rampart-net");
 
 // Allow search indexing of mounted (rclone/FUSE) directories
 // Set global.allowMountedSearch = true in web_server_conf.js to enable
@@ -51,8 +52,8 @@ function findDataRoot() {
 
 
 var dataRoot;
-if(global.serverConf && global.serverConf.dataRoot) {
-    dataRoot=serverConf.dataRoot;
+if((global.serverConf && global.serverConf.dataRoot) || global.DEMO_DATA_ROOT ) {
+    dataRoot=global.DEMO_DATA_ROOT ? global.DEMO_DATA_ROOT : serverConf.dataRoot;
 } else {
     //run from command line.
     global.indexLock = new rampart.lock();
@@ -1017,6 +1018,14 @@ function pathMoveDir(oldDavRel, newDavRel) {
             }
         }
     }
+    // In demo mode, also index the demo-files directory
+    if (DEMO_MODE) {
+        var demoFilesDav = '/' + DEMO_FILES_DIR;
+        var demoFilesFs = DAV_ROOT + demoFilesDav;
+        if (stat(demoFilesFs) && !db.get(searchDbi, demoFilesDav)) {
+            db.put(searchDbi, demoFilesDav, {enabled: true});
+        }
+    }
 })();
 
 if(module && module.exports) {
@@ -1417,6 +1426,77 @@ if(module && module.exports) {
             fprintf(stderr, "Failed to start index service: %s\n", e.message || e);
         }
     })();
+
+    // --- Demo mode: start wipe thread (once per server lifetime) ---
+    if (DEMO_MODE && !rampart.thread.get('demo_wipe_running')) {
+        var _demoWipeThr = new rampart.thread();
+        _demoWipeThr.exec(function(cfg) {
+            rampart.thread.put('demo_wipe_running', true);
+            var u = rampart.utils;
+            var _Sql = require("rampart-sql");
+            var _wSql;
+            try { _wSql = new _Sql.connection(cfg.searchDbPath); } catch(e) { _wSql = null; }
+
+            while (true) {
+                u.sleep(cfg.interval);
+                if (!u.stat(cfg.home)) continue;
+                var entries = u.readdir(cfg.home, true);
+                if (!entries) continue;
+                var now = Date.now();
+                var deleted = [];
+                for (var i = 0; i < entries.length; i++) {
+                    if (entries[i] === '.' || entries[i] === '..') continue;
+                    var p = cfg.home + '/' + entries[i];
+                    var s = u.stat(p);
+                    if (!s) continue;
+                    if ((now - s.mtime.getTime()) / 1000 > cfg.interval) {
+                        deleted.push('/demo/' + entries[i]);
+                        u.shell("rm -rf '" + p.replace(/'/g, "'\\''") + "'");
+                    }
+                }
+                for (var di = 0; di < cfg.dirs.length; di++) {
+                    var dd = cfg.home + '/' + cfg.dirs[di];
+                    if (!u.stat(dd)) try { u.mkdir(dd); } catch(e) {}
+                }
+                // Clean up search index entries for deleted files
+                if (_wSql && deleted.length > 0) {
+                    try {
+                        for (var ddi = 0; ddi < deleted.length; ddi++) {
+                            var delPrefix = deleted[ddi] + '%';
+                            _wSql.exec("DELETE FROM docs WHERE path MATCHES ?", [delPrefix]);
+                            _wSql.exec("DELETE FROM paths WHERE path MATCHES ?", [delPrefix]);
+                            _wSql.exec("DELETE FROM paths WHERE path = ?", [deleted[ddi]]);
+                        }
+                    } catch(e) {}
+                }
+                // Reset quota tracking to actual disk usage after wipe
+                rampart.thread.put('demo_quota_init', false);
+
+                if (u.stat(cfg.thumbDir))
+                    u.shell("rm -rf '" + cfg.thumbDir.replace(/'/g, "'\\''") + "'");
+                if (u.stat(cfg.uploadTmp)) {
+                    var tmpEntries = u.readdir(cfg.uploadTmp, true);
+                    if (tmpEntries) {
+                        for (var ti = 0; ti < tmpEntries.length; ti++) {
+                            if (tmpEntries[ti] === '.' || tmpEntries[ti] === '..') continue;
+                            var tp = cfg.uploadTmp + '/' + tmpEntries[ti];
+                            var ts = u.stat(tp);
+                            if (ts && (now - ts.mtime.getTime()) / 1000 > cfg.interval) {
+                                u.shell("rm -rf '" + tp.replace(/'/g, "'\\''") + "'");
+                            }
+                        }
+                    }
+                }
+            }
+        }, {
+            home: DAV_ROOT + '/demo',
+            thumbDir: dataRoot + '/webdav_thumbnails/demo',
+            uploadTmp: dataRoot + '/webdav_uploads',
+            searchDbPath: SEARCH_DB_PATH,
+            interval: DEMO_CLEAR_TIME,
+            dirs: ['Documents', 'Music', 'Pictures', 'Videos']
+        });
+    }
 }// module.exports
 
 // --- Search query (runs in server threads, reads from Texis DB) ---
@@ -2813,10 +2893,37 @@ function demoGetDirSize(dirPath) {
     return total;
 }
 
+// Initialize demo quota tracking on first call
+function demoInitQuota() {
+    if (rampart.thread.get('demo_quota_init')) return;
+    thrlock.lock();
+    if (!rampart.thread.get('demo_quota_init')) {
+        var demoHome = DAV_ROOT + '/demo';
+        var used = demoGetDirSize(demoHome);
+        rampart.thread.put('demo_quota_used', used);
+        rampart.thread.put('demo_quota_init', true);
+    }
+    thrlock.unlock();
+}
+
+function demoAddQuota(bytes) {
+    thrlock.lock();
+    var used = rampart.thread.get('demo_quota_used') || 0;
+    rampart.thread.put('demo_quota_used', used + bytes);
+    thrlock.unlock();
+}
+
+function demoSubQuota(bytes) {
+    thrlock.lock();
+    var used = rampart.thread.get('demo_quota_used') || 0;
+    rampart.thread.put('demo_quota_used', Math.max(0, used - bytes));
+    thrlock.unlock();
+}
+
 function demoCheckQuota() {
     if (!DEMO_MODE) return true;
-    var demoHome = DAV_ROOT + '/demo';
-    var used = demoGetDirSize(demoHome);
+    demoInitQuota();
+    var used = rampart.thread.get('demo_quota_used') || 0;
     return used < DEMO_MAX_QUOTA;
 }
 
@@ -2943,6 +3050,13 @@ function handlePUT(req, davRelPath, fsPath) {
         }
     }
 
+    // Track old size for quota adjustment
+    var oldSize = 0;
+    if (DEMO_MODE && existed) {
+        var oldSt = stat(fsPath);
+        if (oldSt) oldSize = oldSt.size;
+    }
+
     // Write the body to the file
     try {
         var fp = fopen(fsPath, 'w+');
@@ -2952,6 +3066,12 @@ function handlePUT(req, davRelPath, fsPath) {
         fclose(fp);
     } catch(e) {
         return { status: 403, txt: 'Write failed: ' + (e.message || 'permission denied') };
+    }
+
+    // Update demo quota tracking
+    if (DEMO_MODE) {
+        var newSize = req.body ? req.body.length : 0;
+        demoAddQuota(newSize - oldSize);
     }
 
     var status = existed ? 204 : 201;
@@ -3021,8 +3141,25 @@ function handleChunkedPUT(req, davRelPath, fsPath, uploadId) {
         return { status: 409, txt: 'Upload session not found (missing earlier chunks)' };
     }
 
-    if (req.body && req.body.length > 0) {
+    var chunkSize = (req.body && req.body.length > 0) ? req.body.length : 0;
+    if (chunkSize > 0) {
         fprintf(tmpPath, true, "%s", req.body);
+    }
+
+    // Demo mode: check actual accumulated size and update quota
+    if (DEMO_MODE) {
+        demoAddQuota(chunkSize);
+        var tmpCheck = stat(tmpPath);
+        if (tmpCheck && tmpCheck.size > DEMO_MAX_FILE_SIZE) {
+            demoSubQuota(tmpCheck.size);
+            try { rmFile(tmpPath); } catch(e) {}
+            return { status: 413, txt: 'Demo: file exceeds ' + Math.round(DEMO_MAX_FILE_SIZE/1024/1024) + 'MB limit' };
+        }
+        if (!demoCheckQuota()) {
+            demoSubQuota(tmpCheck ? tmpCheck.size : chunkSize);
+            try { rmFile(tmpPath); } catch(e) {}
+            return { status: 507, txt: 'Demo: storage quota exceeded' };
+        }
     }
 
     // Check if the upload is now complete
@@ -3058,6 +3195,13 @@ function handleDELETE(req, davRelPath, fsPath) {
         return { status: 423, txt: 'Locked' };
     }
 
+    // Track size for demo quota before deletion
+    var deleteSize = 0;
+    if (DEMO_MODE) {
+        if (lst.isDirectory) deleteSize = demoGetDirSize(fsPath);
+        else if (!lst.isSymbolicLink) deleteSize = lst.size || 0;
+    }
+
     try {
         if (lst.isSymbolicLink) {
             // Delete the symlink itself, NOT the target
@@ -3082,6 +3226,7 @@ function handleDELETE(req, davRelPath, fsPath) {
     } catch(e) {
         return { status: 403, txt: 'Delete failed: ' + (e.message || 'Operation not permitted') };
     }
+    if (DEMO_MODE && deleteSize > 0) demoSubQuota(deleteSize);
     return { status: 204, txt: '' };
 }
 
@@ -3130,9 +3275,14 @@ function handleCOPY(req, davRelPath, fsPath) {
     if (!destFsPath) return { status: 400, txt: 'Invalid Destination path' };
     if (!checkAllowedPath(destFsPath)) return { status: 403, txt: 'Forbidden' };
 
-    // Demo mode: block copying INTO protected paths
-    if (DEMO_MODE && demoIsProtectedPath(destDavRel)) {
-        return { status: 403, txt: 'Demo: this directory is read-only' };
+    // Demo mode: block copying INTO protected paths, enforce quota
+    if (DEMO_MODE) {
+        if (demoIsProtectedPath(destDavRel)) {
+            return { status: 403, txt: 'Demo: this directory is read-only' };
+        }
+        if (!demoCheckQuota()) {
+            return { status: 507, txt: 'Demo: storage quota exceeded' };
+        }
     }
 
     if (req.davUser && !authorize(req.davUser, destDavRel, 'COPY')) {
@@ -3968,55 +4118,7 @@ function main_dispatch(req) {
             }
         }
 
-        // Demo mode: start wipe thread on first login
-        if (DEMO_MODE && !rampart.thread.get('demo_wipe_running')) {
-            var _demoWipeThr = new rampart.thread();
-            _demoWipeThr.exec(function(cfg) {
-                rampart.thread.put('demo_wipe_running', true);
-                var u = rampart.utils;
-                while (true) {
-                    u.sleep(cfg.interval);
-                    if (!u.stat(cfg.home)) continue;
-                    var entries = u.readdir(cfg.home, true);
-                    if (!entries) continue;
-                    var now = Date.now();
-                    for (var i = 0; i < entries.length; i++) {
-                        if (entries[i] === '.' || entries[i] === '..') continue;
-                        var p = cfg.home + '/' + entries[i];
-                        var s = u.stat(p);
-                        if (!s) continue;
-                        if ((now - s.mtime.getTime()) / 1000 > cfg.interval) {
-                            u.shell("rm -rf '" + p.replace(/'/g, "'\\''") + "'");
-                        }
-                    }
-                    for (var di = 0; di < cfg.dirs.length; di++) {
-                        var dd = cfg.home + '/' + cfg.dirs[di];
-                        if (!u.stat(dd)) try { u.mkdir(dd); } catch(e) {}
-                    }
-                    if (u.stat(cfg.thumbDir))
-                        u.shell("rm -rf '" + cfg.thumbDir.replace(/'/g, "'\\''") + "'");
-                    if (u.stat(cfg.uploadTmp)) {
-                        var tmpEntries = u.readdir(cfg.uploadTmp, true);
-                        if (tmpEntries) {
-                            for (var ti = 0; ti < tmpEntries.length; ti++) {
-                                if (tmpEntries[ti] === '.' || tmpEntries[ti] === '..') continue;
-                                var tp = cfg.uploadTmp + '/' + tmpEntries[ti];
-                                var ts = u.stat(tp);
-                                if (ts && (now - ts.mtime.getTime()) / 1000 > cfg.interval) {
-                                    u.shell("rm -rf '" + tp.replace(/'/g, "'\\''") + "'");
-                                }
-                            }
-                        }
-                    }
-                }
-            }, {
-                home: DAV_ROOT + '/demo',
-                thumbDir: dataRoot + '/webdav_thumbnails/demo',
-                uploadTmp: dataRoot + '/webdav_uploads',
-                interval: DEMO_CLEAR_TIME,
-                dirs: ['Documents', 'Music', 'Pictures', 'Videos']
-            });
-        }
+        // Demo wipe thread is started at module load (see top-level init)
 
         return {
             status: 200,
@@ -4114,6 +4216,30 @@ function main_dispatch(req) {
         var fuUrl = (fuBody.url || '').trim();
         if (!fuUrl || !/^https?:\/\//i.test(fuUrl)) {
             return { status: 400, json: {ok: false, error: 'Invalid URL'} };
+        }
+        // Block requests to private/internal IPs to prevent SSRF
+        var fuHostMatch = fuUrl.match(/^https?:\/\/([^:\/\[\]]+|\[[^\]]+\])/i);
+        if (fuHostMatch) {
+            var fuHost = fuHostMatch[1].replace(/^\[|\]$/g, '');
+            var fuResolved;
+            try { fuResolved = net.resolve(fuHost); } catch(e) {
+                return { status: 400, json: {ok: false, error: 'Could not resolve hostname'} };
+            }
+            var fuAddrs = (fuResolved && fuResolved.ipaddrs) || [];
+            for (var fai = 0; fai < fuAddrs.length; fai++) {
+                var addr = fuAddrs[fai];
+                if (addr === '127.0.0.1' || addr === '::1' ||
+                    /^10\./.test(addr) ||
+                    /^172\.(1[6-9]|2[0-9]|3[01])\./.test(addr) ||
+                    /^192\.168\./.test(addr) ||
+                    /^169\.254\./.test(addr) ||
+                    /^0\./.test(addr) ||
+                    /^fe80:/i.test(addr) ||
+                    /^fc00:/i.test(addr) ||
+                    /^fd/i.test(addr)) {
+                    return { status: 403, json: {ok: false, error: 'Requests to private/internal addresses are not allowed'} };
+                }
+            }
         }
         var fuDir = (fuBody.dir || '').trim();
         if (!fuDir) return { status: 400, json: {ok: false, error: 'Missing target directory'} };
