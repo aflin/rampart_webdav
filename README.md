@@ -96,7 +96,7 @@ A self-hosted web file manager with a full-featured WebDAV backend, built on the
 Built-in demo mode for public showcases:
 
 - Single `demo:demo` user account
-- Read-only `demo-files` directory with sample files
+- Read-only `readonly-files` directory with sample files
 - Automatic cleanup of user files after a configurable interval
 - Upload size and storage quota limits
 - Password change, session management, cloud storage, and admin features disabled

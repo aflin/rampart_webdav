@@ -7342,8 +7342,8 @@ const Viewers = {
     }
     window.addEventListener('message', onMessage);
 
-    var isDemoFile = Auth.demoMode && item.href.indexOf('/dav/demo-files/') === 0;
-    var winTitle = isDemoFile ? item.name + ' (read only — copy out of demo-files to edit)' : item.name;
+    var isDemoFile = Auth.demoMode && item.href.indexOf('/dav/readonly-files/') === 0;
+    var winTitle = isDemoFile ? item.name + ' (read only — copy out of readonly-files to edit)' : item.name;
 
     winId = WinManager.open(winTitle, iframe, {
       type: 'office', full: true, noPadding: true,
@@ -8723,7 +8723,7 @@ const App = {
         if (Auth.demoMode) {
           var secs = Auth.demoClearTime || 600;
           var timeStr = secs >= 120 ? Math.round(secs / 60) + ' minutes' : secs + ' seconds';
-          Dialog.alert('Welcome to the demo! Files you upload or create will be automatically deleted after ' + timeStr + ' of inactivity. Copy files from the demo-files folder to get started.');
+          Dialog.alert('Welcome to the demo! Files you upload or create will be automatically deleted after ' + timeStr + ' of inactivity. Copy files from the readonly-files folder to get started.');
         }
       } else {
         errEl.textContent = result.error;

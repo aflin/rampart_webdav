@@ -145,7 +145,7 @@ var DEMO_MODE = !!global.DEMO_MODE;
 var DEMO_MAX_FILE_SIZE = global.DEMO_MAX_FILE_SIZE || 50*1024*1024;
 var DEMO_MAX_QUOTA = global.DEMO_MAX_QUOTA || 500*1024*1024;
 var DEMO_CLEAR_TIME = global.DEMO_CLEAR_TIME || 600;
-var DEMO_FILES_DIR = 'demo-files';  // read-only showcase directory name
+var DEMO_FILES_DIR = 'readonly-files';  // read-only showcase directory name
 
 if (DEMO_MODE) {
     // Ensure demo user exists
@@ -169,7 +169,7 @@ if (DEMO_MODE) {
         var _dd = demoHome + '/' + demoSubDirs[_di];
         if (!stat(_dd)) mkdir(_dd);
     }
-    // Ensure demo-files read-only directory at DAV root level
+    // Ensure readonly-files read-only directory at DAV root level
     var demoFilesPath = DAV_ROOT + '/' + DEMO_FILES_DIR;
     if (!stat(demoFilesPath)) mkdir(demoFilesPath);
 }
@@ -1018,7 +1018,7 @@ function pathMoveDir(oldDavRel, newDavRel) {
             }
         }
     }
-    // In demo mode, also index the demo-files directory
+    // In demo mode, also index the readonly-files directory
     if (DEMO_MODE) {
         var demoFilesDav = '/' + DEMO_FILES_DIR;
         var demoFilesFs = DAV_ROOT + demoFilesDav;
@@ -2105,8 +2105,15 @@ function authorize(user, davRelPath, method) {
     // Users can access their own home directory
     if (pathOwner === user.username) return true;
 
-    // Non-user top-level directories (shared, shared2, etc.) are accessible to all
-    if (!db.get(userDbi, pathOwner)) return true;
+    // Non-user top-level directories (shared, etc.) — read access for all,
+    // but creating new top-level directories is admin-only
+    if (!db.get(userDbi, pathOwner)) {
+        // If this IS the top-level path (e.g. /shared) and it's a write that creates it, admin only
+        if (segments.length <= 2 && method === 'MKCOL' && !stat(DAV_ROOT + '/' + pathOwner)) {
+            return false;
+        }
+        return true;
+    }
 
     return false;
 }
@@ -2929,7 +2936,7 @@ function demoCheckQuota() {
 
 function demoIsProtectedPath(davRelPath) {
     if (!DEMO_MODE) return false;
-    // Protect demo-files directory from writes
+    // Protect readonly-files directory from writes
     return davRelPath === '/' + DEMO_FILES_DIR ||
            davRelPath.indexOf('/' + DEMO_FILES_DIR + '/') === 0;
 }
@@ -3012,7 +3019,7 @@ function handleHEAD(req, davRelPath, fsPath) {
 }
 
 function handlePUT(req, davRelPath, fsPath) {
-    // Demo mode: protect demo-files, enforce size limit and quota
+    // Demo mode: protect readonly-files, enforce size limit and quota
     if (DEMO_MODE) {
         if (demoIsProtectedPath(davRelPath))
             return { status: 403, txt: 'Demo: this directory is read-only' };
@@ -7127,19 +7134,22 @@ function admin() {
         }
 
         // Create shared directory with 777 permissions, group "everyone"
-        var sharedPath = DAV_ROOT + '/shared';
-        if (!stat(sharedPath)) mkdir(sharedPath);
-        var sharedRel = '/shared/';
-        if (!getFileMeta(sharedRel)) {
-            var sharedMeta = {
-                path: sharedRel,
-                owner: username,
-                group: 'everyone',
-                permissions: 777,
-                isDir: true,
-                created: new Date().toISOString()
-            };
-            setFileMeta(sharedRel, sharedMeta);
+        // Skip in demo mode — demo doesn't need a shared directory
+        if (!DEMO_MODE) {
+            var sharedPath = DAV_ROOT + '/shared';
+            if (!stat(sharedPath)) mkdir(sharedPath);
+            var sharedRel = '/shared/';
+            if (!getFileMeta(sharedRel)) {
+                var sharedMeta = {
+                    path: sharedRel,
+                    owner: username,
+                    group: 'everyone',
+                    permissions: 777,
+                    isDir: true,
+                    created: new Date().toISOString()
+                };
+                setFileMeta(sharedRel, sharedMeta);
+            }
         }
 
         printf("\nAdmin user '%s' created successfully.\n", username);
