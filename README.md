@@ -2,6 +2,8 @@
 
 A self-hosted web file manager with a full-featured WebDAV backend, built on the [Rampart](https://github.com/aflin/rampart) web server.
 
+**Live demo:** [https://rampart.dev/filemanager/](https://rampart.dev/filemanager/) (login: demo / demo)
+
 ## Features
 
 ### File Manager UI
