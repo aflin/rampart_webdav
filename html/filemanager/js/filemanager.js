@@ -2078,7 +2078,6 @@ const Clipboard = {
       }
     }
 
-    clearTimeout(pasteTimer);
     if (progressToast) progressToast.remove();
     if (this.action === 'cut') this.clear();
     if (errorMsgs.length) Toast.error(errorMsgs.join('\n'));
