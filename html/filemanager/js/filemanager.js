@@ -2079,7 +2079,7 @@ const Clipboard = {
     }
 
     if (progressToast) progressToast.remove();
-    if (this.action === 'cut') this.clear();
+    this.clear();
     if (errorMsgs.length) Toast.error(errorMsgs.join('\n'));
     if (copied > 0) Toast.success((method === 'MOVE' ? 'Moved' : 'Copied') + ' ' + copied + ' item(s)');
 
