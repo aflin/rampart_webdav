@@ -9439,18 +9439,27 @@ const App = {
       speedBtn.textContent = 'Scroll: ' + scrollMult + 'x';
     });
 
-    // Intercept wheel events in capture phase, dispatch N copies to the canvas.
-    // noVNC sends at most ONE scroll-click per wheel event (its threshold check
-    // is `if`, not `while`), so multiplying deltas doesn't help — we need to
-    // dispatch multiple synthetic events to send multiple scroll clicks.
+    // Intercept wheel events in capture phase:
+    //   1) At scrollMult >= 8, zero out deltaX. Mac trackpads produce small
+    //      horizontal drift during vertical scrolling; amplified, this reliably
+    //      crosses noVNC's 50px horizontal threshold and sends VNC button 6/7
+    //      (horizontal scroll). macOS Screen Sharing translates those into
+    //      spurious otherMouseDown/Up events instead of horizontal scroll, and
+    //      Firefox on the remote treats them as clicks → opens links.
+    //      Below 8x we pass deltaX through so intentional horizontal scroll works.
+    //   2) When scrollMult > 1, dispatch N copies. noVNC's wheel threshold
+    //      check is `if`, not `while`, so one wheel event sends at most one
+    //      scroll-click regardless of delta magnitude; we need multiple
+    //      synthetic events to send multiple scroll clicks.
     container.addEventListener('wheel', function(ev) {
       if (ev._scrollAccel || scrollMult === 1) return;
       ev.stopImmediatePropagation();
       ev.preventDefault();
       var target = ev.target;
+      var killX = scrollMult >= 8;
       for (var i = 0; i < scrollMult; i++) {
         var fake = new WheelEvent('wheel', {
-          deltaX: ev.deltaX,
+          deltaX: killX ? 0 : ev.deltaX,
           deltaY: ev.deltaY,
           deltaZ: ev.deltaZ,
           deltaMode: ev.deltaMode,
