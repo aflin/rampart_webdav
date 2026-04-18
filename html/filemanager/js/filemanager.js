@@ -9224,10 +9224,10 @@ const App = {
         resolve('newtab');
         Dialog.close();
       });
-      // Enter in any input submits Connect when username is filled in
+      // Enter in any input submits Connect when password is filled in
       wrap.addEventListener('keydown', function(e) {
         if (e.key !== 'Enter') return;
-        if (!userInput.value.trim()) return;
+        if (!passInput.value) return;
         e.preventDefault();
         connectBtn.click();
       });
@@ -9417,19 +9417,25 @@ const App = {
       applyVncZoom();
     });
 
-    // Scroll speed multiplier — cycles through values, persisted in localStorage
+    // Scroll speed multiplier — cycles through values, persisted per host:port
     var SCROLL_STEPS = [1, 2, 4, 8, 16, 32, 64, 128];
-    var scrollMult = parseInt(localStorage.getItem('vncScrollMult'), 10);
+    var scrollHostKey = host + ':' + port;
+    var scrollMults;
+    try { scrollMults = JSON.parse(localStorage.getItem('vncScrollMults') || '{}'); }
+    catch(e) { scrollMults = {}; }
+    if (!scrollMults || typeof scrollMults !== 'object') scrollMults = {};
+    var scrollMult = parseInt(scrollMults[scrollHostKey], 10);
     if (SCROLL_STEPS.indexOf(scrollMult) === -1) scrollMult = 1;
     var speedBtn = document.createElement('button');
     speedBtn.className = 'modal-header-btn';
-    speedBtn.title = 'Scroll wheel speed multiplier (helps with macOS remotes)';
+    speedBtn.title = 'Scroll wheel speed multiplier (helps with macOS remotes) — saved per host';
     speedBtn.style.cssText = 'font-size:11px;min-width:auto;padding:2px 6px';
     speedBtn.textContent = 'Scroll: ' + scrollMult + 'x';
     speedBtn.addEventListener('click', function() {
       var idx = SCROLL_STEPS.indexOf(scrollMult);
       scrollMult = SCROLL_STEPS[(idx + 1) % SCROLL_STEPS.length];
-      localStorage.setItem('vncScrollMult', String(scrollMult));
+      scrollMults[scrollHostKey] = scrollMult;
+      localStorage.setItem('vncScrollMults', JSON.stringify(scrollMults));
       speedBtn.textContent = 'Scroll: ' + scrollMult + 'x';
     });
 
