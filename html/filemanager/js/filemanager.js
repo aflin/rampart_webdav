@@ -9075,21 +9075,112 @@ const App = {
     var wrap = document.createElement('div');
     wrap.style.cssText = 'display:flex;flex-direction:column;gap:8px';
 
+    // Load history: array of {host, port} in MRU order
+    var history;
+    try { history = JSON.parse(localStorage.getItem('vncHistory') || '[]'); }
+    catch(e) { history = []; }
+    if (!Array.isArray(history)) history = [];
+
     var hostLabel = document.createElement('label');
     hostLabel.textContent = 'VNC Host';
+    // Wrap hostInput so the dropdown can be positioned relative to it
+    var hostWrap = document.createElement('div');
+    hostWrap.style.cssText = 'position:relative';
     var hostInput = document.createElement('input');
     hostInput.type = 'text';
     hostInput.className = 'dialog-input';
-    hostInput.value = 'localhost';
+    hostInput.value = history.length ? history[0].host : 'localhost';
     hostInput.placeholder = 'hostname or IP';
+    hostInput.autocomplete = 'off';
+    hostWrap.appendChild(hostInput);
 
     var portLabel = document.createElement('label');
     portLabel.textContent = 'VNC Port';
     var portInput = document.createElement('input');
     portInput.type = 'text';
     portInput.className = 'dialog-input';
-    portInput.value = '5900';
+    portInput.value = history.length ? history[0].port : '5900';
     portInput.placeholder = '5900';
+
+    // Custom history dropdown — shows host:port on one line, fills both fields on click
+    var histDrop = document.createElement('div');
+    histDrop.style.cssText = 'position:absolute;left:0;right:0;top:100%;z-index:10000;' +
+      'background:var(--menu-bg, #fff);color:var(--text, #000);' +
+      'border:1px solid var(--border, #ccc);border-radius:4px;' +
+      'box-shadow:0 4px 12px rgba(0,0,0,0.2);max-height:200px;overflow-y:auto;display:none';
+    hostWrap.appendChild(histDrop);
+
+    var histActiveIdx = -1;
+
+    function applyHistRow(h) {
+      hostInput.value = h.host;
+      portInput.value = h.port;
+      histDrop.style.display = 'none';
+      histActiveIdx = -1;
+    }
+
+    function highlightHistRow(idx) {
+      var rows = histDrop.children;
+      for (var i = 0; i < rows.length; i++) {
+        rows[i].style.background = (i === idx) ? 'var(--hover-bg, #eee)' : '';
+      }
+      histActiveIdx = idx;
+      if (idx >= 0 && rows[idx]) rows[idx].scrollIntoView({block: 'nearest'});
+    }
+
+    function renderHistDrop() {
+      if (!history.length) { histDrop.style.display = 'none'; return; }
+      histDrop.innerHTML = '';
+      histActiveIdx = -1;
+      history.forEach(function(h, i) {
+        var row = document.createElement('div');
+        row.style.cssText = 'padding:6px 10px;cursor:pointer;white-space:nowrap;' +
+          'overflow:hidden;text-overflow:ellipsis';
+        row.textContent = h.host + ':' + h.port;
+        row.addEventListener('mouseenter', function() { highlightHistRow(i); });
+        row.addEventListener('mouseleave', function() { highlightHistRow(-1); });
+        row.addEventListener('mousedown', function(e) {
+          e.preventDefault(); // keep focus on input
+          applyHistRow(h);
+        });
+        histDrop.appendChild(row);
+      });
+      histDrop.style.display = 'block';
+    }
+
+    hostInput.addEventListener('input', function() {
+      var match = history.find(function(h) { return h.host === hostInput.value.trim(); });
+      if (match) portInput.value = match.port;
+    });
+    hostInput.addEventListener('blur', function() {
+      setTimeout(function() { histDrop.style.display = 'none'; histActiveIdx = -1; }, 150);
+    });
+    hostInput.addEventListener('keydown', function(e) {
+      // ArrowDown reopens the dropdown when it's hidden
+      if (histDrop.style.display === 'none') {
+        if (e.key === 'ArrowDown' && history.length) {
+          e.preventDefault();
+          renderHistDrop();
+          highlightHistRow(0);
+        }
+        return;
+      }
+      var n = histDrop.children.length;
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        highlightHistRow(histActiveIdx < n - 1 ? histActiveIdx + 1 : 0);
+      } else if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        highlightHistRow(histActiveIdx > 0 ? histActiveIdx - 1 : n - 1);
+      } else if (e.key === 'Enter' && histActiveIdx >= 0) {
+        e.preventDefault();
+        e.stopPropagation(); // don't trigger Connect
+        applyHistRow(history[histActiveIdx]);
+      } else if (e.key === 'Escape') {
+        histDrop.style.display = 'none';
+        histActiveIdx = -1;
+      }
+    });
 
     var userLabel = document.createElement('label');
     userLabel.textContent = 'Username (for macOS, leave blank for standard VNC)';
@@ -9107,7 +9198,7 @@ const App = {
     passInput.placeholder = 'VNC password';
 
     wrap.appendChild(hostLabel);
-    wrap.appendChild(hostInput);
+    wrap.appendChild(hostWrap);
     wrap.appendChild(portLabel);
     wrap.appendChild(portInput);
     wrap.appendChild(userLabel);
@@ -9133,9 +9224,17 @@ const App = {
         resolve('newtab');
         Dialog.close();
       });
+      // Enter in any input submits Connect when username is filled in
+      wrap.addEventListener('keydown', function(e) {
+        if (e.key !== 'Enter') return;
+        if (!userInput.value.trim()) return;
+        e.preventDefault();
+        connectBtn.click();
+      });
       wrap.appendChild(connectBtn);
       wrap.appendChild(newTabBtn);
       Dialog.open('VNC Remote Desktop', wrap);
+      setTimeout(function() { hostInput.focus(); hostInput.select(); }, 0);
     });
 
     if (!confirmed) return;
@@ -9144,6 +9243,12 @@ const App = {
     var port = portInput.value.trim() || '5900';
     var username = userInput.value.trim();
     var password = passInput.value;
+
+    // Update history: move/add to front, dedupe by host, cap at 10
+    history = history.filter(function(h) { return h.host !== host; });
+    history.unshift({host: host, port: port});
+    if (history.length > 10) history.length = 10;
+    localStorage.setItem('vncHistory', JSON.stringify(history));
 
     if (confirmed === 'newtab') {
       var vncParams = '?vnc=' + encodeURIComponent(host) + ':' + encodeURIComponent(port) +
@@ -9312,9 +9417,57 @@ const App = {
       applyVncZoom();
     });
 
+    // Scroll speed multiplier — cycles through values, persisted in localStorage
+    var SCROLL_STEPS = [1, 2, 4, 8, 16, 32, 64, 128];
+    var scrollMult = parseInt(localStorage.getItem('vncScrollMult'), 10);
+    if (SCROLL_STEPS.indexOf(scrollMult) === -1) scrollMult = 1;
+    var speedBtn = document.createElement('button');
+    speedBtn.className = 'modal-header-btn';
+    speedBtn.title = 'Scroll wheel speed multiplier (helps with macOS remotes)';
+    speedBtn.style.cssText = 'font-size:11px;min-width:auto;padding:2px 6px';
+    speedBtn.textContent = 'Scroll: ' + scrollMult + 'x';
+    speedBtn.addEventListener('click', function() {
+      var idx = SCROLL_STEPS.indexOf(scrollMult);
+      scrollMult = SCROLL_STEPS[(idx + 1) % SCROLL_STEPS.length];
+      localStorage.setItem('vncScrollMult', String(scrollMult));
+      speedBtn.textContent = 'Scroll: ' + scrollMult + 'x';
+    });
+
+    // Intercept wheel events in capture phase, dispatch N copies to the canvas.
+    // noVNC sends at most ONE scroll-click per wheel event (its threshold check
+    // is `if`, not `while`), so multiplying deltas doesn't help — we need to
+    // dispatch multiple synthetic events to send multiple scroll clicks.
+    container.addEventListener('wheel', function(ev) {
+      if (ev._scrollAccel || scrollMult === 1) return;
+      ev.stopImmediatePropagation();
+      ev.preventDefault();
+      var target = ev.target;
+      for (var i = 0; i < scrollMult; i++) {
+        var fake = new WheelEvent('wheel', {
+          deltaX: ev.deltaX,
+          deltaY: ev.deltaY,
+          deltaZ: ev.deltaZ,
+          deltaMode: ev.deltaMode,
+          clientX: ev.clientX,
+          clientY: ev.clientY,
+          screenX: ev.screenX,
+          screenY: ev.screenY,
+          ctrlKey: ev.ctrlKey,
+          shiftKey: ev.shiftKey,
+          altKey: ev.altKey,
+          metaKey: ev.metaKey,
+          buttons: ev.buttons,
+          bubbles: true,
+          cancelable: true
+        });
+        fake._scrollAccel = true;
+        target.dispatchEvent(fake);
+      }
+    }, { capture: true, passive: false });
+
     var winId = WinManager.open(winTitle, container, {
       type: 'vnc', full: true, noPadding: true,
-      headerActions: [cadBtn, pasteBtn, copyBtn, zoomOutBtn, zoomLabel, zoomInBtn, fitBtn],
+      headerActions: [cadBtn, pasteBtn, copyBtn, zoomOutBtn, zoomLabel, zoomInBtn, fitBtn, speedBtn],
       onClose: function() {
         if (window[vncKey]) {
           try { window[vncKey].disconnect(); } catch(e) {}
