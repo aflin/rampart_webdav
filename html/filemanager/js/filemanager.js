@@ -3559,6 +3559,7 @@ const FileList = {
       this.items = items.filter(i => !i.isSelf);
       this._sortItems();
       this.render();
+      this._lazyLoadMimes();
     } catch (e) {
       this._container.innerHTML = '<div class="file-list-empty">Failed to load directory</div>';
       return;
@@ -4398,6 +4399,56 @@ const FileList = {
     const parts = this.currentPath.replace(/\/$/, '').split('/');
     parts.pop();
     return parts.join('/') + '/';
+  },
+
+  // After a listing renders, ask the server to detect MIME types for files whose
+  // extension is unknown (server returned application/octet-stream during PROPFIND
+  // to keep the listing fast). One batched POST → one shell-out on the server.
+  // Updates icon classes in place; doesn't re-render the whole list.
+  _lazyLoadMimes() {
+    var unknown = this.items.filter(function(i) {
+      return !i.isDir && i.mime === 'application/octet-stream';
+    });
+    if (!unknown.length) return;
+    var paths = unknown.map(function(i) { return i.href; });
+    var itemsAtRequest = this.items;
+    var self = this;
+    fetch(App.davUrl + '_mimes', {
+      method: 'POST', credentials: 'same-origin',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({paths: paths})
+    })
+      .then(function(r) { return r.json(); })
+      .then(function(data) {
+        if (!data || !data.ok || !data.mimes) return;
+        // Bail out if user navigated away — this.items is now a different array.
+        if (self.items !== itemsAtRequest) return;
+        var mimes = data.mimes;
+        for (var i = 0; i < self.items.length; i++) {
+          var it = self.items[i];
+          if (mimes[it.href] && it.mime === 'application/octet-stream') {
+            it.mime = mimes[it.href];
+            self._updateItemIcon(it);
+          }
+        }
+      })
+      .catch(function() { /* lazy load failures are non-fatal */ });
+  },
+
+  _updateItemIcon(item) {
+    var sel = '[data-href="' + (window.CSS && CSS.escape ? CSS.escape(item.href) : item.href.replace(/"/g, '\\"')) + '"]';
+    // List view
+    var row = this._container.querySelector('tr' + sel);
+    if (row) {
+      var rowIcon = row.querySelector('.file-name .icon-wrap > .icon');
+      if (rowIcon) rowIcon.className = 'icon ' + this._getIconClass(item);
+    }
+    // Grid view (only when there's an icon — files with thumbnails don't need updating)
+    var card = this._container.querySelector('.grid-item' + sel);
+    if (card) {
+      var cardIcon = card.querySelector('.grid-thumb > .icon');
+      if (cardIcon) cardIcon.className = 'icon ' + this._getIconClass(item);
+    }
   },
 
   _getIconClass(item) {

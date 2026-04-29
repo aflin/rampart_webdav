@@ -124,9 +124,16 @@ function computeRelativePath(fromDir, toPath) {
 var UPLOAD_TMP = dataRoot + '/webdav_uploads';
 if (!stat(UPLOAD_TMP)) mkdir(UPLOAD_TMP);
 
-// LMDB database (users + dead properties)
+// LMDB database (users + dead properties + filemeta + shares + search index, etc.)
+// growOnPut: auto-resize the env when a `db.put` would otherwise throw MAP_FULL.
+//   Only applies to the easy functions; txn.put/txn.commit can still throw if
+//   the env was full at txn start, but in practice db.put traffic (filemeta,
+//   search index, shares) trips growOnPut well before our txn paths
+//   (dead-prop subtree moves) would ever fill up.
+// mapSize is just the *initial* reserved address space; LMDB only commits
+// pages as data is written, so a larger value here costs nothing on disk.
 var DB_PATH = dataRoot + '/webdav_meta';
-var db = new Lmdb.init(DB_PATH, true, {conversion: 'JSON', mapSize: 64});
+var db = new Lmdb.init(DB_PATH, true, {conversion: 'JSON', mapSize: 256, growOnPut: true});
 var userDbi = db.openDb("users", true);
 var propsDbi = db.openDb("props", true);
 var filemetaDbi = db.openDb("filemeta", true);
@@ -1827,6 +1834,16 @@ function getSharedPaths() {
         for (var i = 0; i < keys.length; i++) {
             var rec = allShares[keys[i]];
             if (rec.expires && new Date(rec.expires) < new Date()) continue;
+            // Lazy cleanup: if the underlying file was deleted outside the file
+            // manager, drop the share record so a recreated path doesn't resurrect
+            // the share. Cache rebuilds every 5s, so this self-heals continuously.
+            try {
+                var shFs = DAV_ROOT + decodeURIComponent(rec.path);
+                if (!stat(shFs) && !lstat(shFs)) {
+                    db.del(sharesDbi, keys[i]);
+                    continue;
+                }
+            } catch(e) {}
             paths[rec.path] = true;
         }
     }
@@ -1888,7 +1905,12 @@ function xmlEscape(s) {
 // 2. File metadata cache (stored per-file in LMDB)
 // 3. `file --mime-type` detection, result stored in file metadata
 // 4. Fallback: application/octet-stream (also stored so we don't retry)
-function getMimeType(fsPath, davRelPath) {
+//
+// When `cheap` is true (used by PROPFIND listings), skip step 3 — return
+// 'application/octet-stream' without forking. Client lazy-loads real mimes
+// via POST /dav/_mimes after the listing is rendered. One fork-and-exec
+// per file × hundreds of files used to time out the request.
+function getMimeType(fsPath, davRelPath, cheap) {
     var dot = fsPath.lastIndexOf('.');
     var ext = dot !== -1 ? fsPath.substring(dot + 1).toLowerCase() : '';
 
@@ -1904,7 +1926,9 @@ function getMimeType(fsPath, davRelPath) {
         if (meta && meta.mimeType) return meta.mimeType;
     }
 
-    // 3. Detect via `file --mime-type` — skip for remote/FUSE mounts (too slow)
+    // 3. Detect via `file --mime-type` — skip in cheap mode and for remote/FUSE mounts
+    if (cheap) return 'application/octet-stream';
+
     var fsStat = stat(fsPath);
     if (fsStat && fsStat.dev !== DAV_ROOT_DEV) {
         return 'application/octet-stream';
@@ -2547,7 +2571,10 @@ function buildResourceResponse(href, fsPath, st, propReq) {
             foundProps += '<D:getcontentlength>' + (st.isDirectory ? 0 : st.size) + '</D:getcontentlength>\n';
         }
         if (wantProp('getcontenttype')) {
-            foundProps += '<D:getcontenttype>' + (st.isDirectory ? 'httpd/unix-directory' : getMimeType(fsPath, getDavRelPath(href))) + '</D:getcontenttype>\n';
+            // cheap=true: skip the per-file `file --mime-type` shell-out during listing.
+            // Unknown extensions return application/octet-stream; the client lazy-loads
+            // the real types via POST /dav/_mimes (single batched shell call).
+            foundProps += '<D:getcontenttype>' + (st.isDirectory ? 'httpd/unix-directory' : getMimeType(fsPath, getDavRelPath(href), true)) + '</D:getcontenttype>\n';
         }
         if (wantProp('getlastmodified')) {
             foundProps += '<D:getlastmodified>' + formatRFC1123(st.mtime) + '</D:getlastmodified>\n';
@@ -2822,6 +2849,51 @@ function removeDeadPropsRecursive(davRelPath) {
         entry = txn.cursorNext(true);
     }
     txn.commit();
+}
+
+// Lazy cleanup: when listing a directory, find LMDB entries for direct children
+// whose disk file is gone (deleted/renamed outside the file manager) and remove
+// their orphan rows from propsDbi + filemetaDbi. Subtree rows are pruned via
+// removeDeadPropsRecursive so a deleted directory's descendants go too.
+//
+// Failure is non-fatal — PROPFIND must still succeed if cleanup hits an error.
+function lazyCleanupOrphans(parentDavPath, diskNames) {
+    if (!parentDavPath) return;
+    var diskSet = {};
+    for (var di = 0; di < diskNames.length; di++) diskSet[diskNames[di]] = true;
+
+    var prefix = parentDavPath;
+    if (prefix.charAt(prefix.length - 1) !== '/') prefix += '/';
+
+    var orphans = [];
+    try {
+        var txn = new db.transaction(propsDbi, false); // read-only scan
+        var entry = txn.cursorGet(db.op_setRange, prefix, true);
+        while (entry) {
+            if (entry.key === undefined || entry.key === null) break;
+            var k = typeof entry.key === 'string' ? entry.key : bufferToString(entry.key);
+            if (k.indexOf(prefix) !== 0) break;
+            // Only inspect immediate children — descendants will be visited when
+            // their own parent directory is listed, or via recursive removal here.
+            var rest = k.substring(prefix.length).replace(/\/$/, '');
+            if (rest && rest.indexOf('/') === -1 && !diskSet[rest]) {
+                orphans.push(k);
+            }
+            entry = txn.cursorNext(true);
+        }
+        txn.commit();
+    } catch(e) { return; }
+
+    for (var oi = 0; oi < orphans.length; oi++) {
+        var orphan = orphans[oi];
+        // removeDeadPropsRecursive handles both the entry itself and any
+        // descendants (relevant for orphan directories whose subtree was deleted).
+        try { removeDeadPropsRecursive(orphan); } catch(e) {}
+        // Also clean filemeta entries (non-user paths only — no-op otherwise).
+        var trimmed = orphan.replace(/\/$/, '');
+        try { deleteFileMeta(trimmed); } catch(e) {}
+        try { deleteFileMeta(trimmed + '/'); } catch(e) {}
+    }
 }
 
 function moveDeadProps(srcDavPath, dstDavPath) {
@@ -3489,6 +3561,13 @@ function handlePROPFIND(req, davRelPath, fsPath) {
             });
         }
 
+        // Lazy LMDB cleanup: drop orphan rows for files removed outside the file
+        // manager. Skipped for the root pseudo-listing since usernames there are
+        // managed via userDbi, not propsDbi/filemetaDbi.
+        if (davRelPath !== '/') {
+            lazyCleanupOrphans(davRelPath, entries);
+        }
+
         for (var i = 0; i < entries.length; i++) {
             var childName = entries[i];
             var childFsPath = fsPath + '/' + childName;
@@ -4015,6 +4094,84 @@ function main_dispatch(req) {
         var riTable = searchTableName(riDavPath);
         searchScanDir(riFsPath, riDavPath, riTable);
         return _attachCookie({ status: 200, json: {ok: true, message: 'Reindex started for ' + riDavPath} }, riUser);
+    }
+
+    // Batch MIME-type detection: POST /dav/_mimes  body {paths: ["/dav/aaron/x.bin", ...]}
+    // Returns {mimes: {"/dav/aaron/x.bin": "application/octet-stream", ...}}
+    // Skips paths whose extension is in Rampart's built-in map or LMDB cache, then
+    // runs `file --mime-type -b` ONCE on the remainder. Caches results in LMDB.
+    if (method === 'POST' && fullPath === DAV_PREFIX + '/_mimes') {
+        var mmUser = authenticate(req);
+        if (!mmUser) return { status: 401, json: {ok: false, error: 'Not authenticated'} };
+        var mmBody;
+        try { mmBody = JSON.parse(bufferToString(req.body)); } catch(e) {
+            return { status: 400, json: {ok: false, error: 'Invalid JSON'} };
+        }
+        var mmPaths = Array.isArray(mmBody.paths) ? mmBody.paths : [];
+        if (!mmPaths.length) return { status: 200, json: {ok: true, mimes: {}} };
+
+        var mmMimes = {};
+        var mmDetectFs = [];   // fs paths still needing `file --mime-type`
+        var mmDetectKey = [];  // matching client paths for the response
+        var mmDetectDav = [];  // matching dav-relative paths for cache writeback
+
+        for (var mmi = 0; mmi < mmPaths.length; mmi++) {
+            var mmDav = mmPaths[mmi];
+            if (typeof mmDav !== 'string') continue;
+            var mmRel = getDavRelPath(mmDav.replace(/\/$/, ''));
+            var mmFs = buildFsPath(mmRel);
+            if (!mmFs) continue;
+            if (!authorize(mmUser, mmRel, 'GET')) continue;
+            var mmStat = stat(mmFs);
+            if (!mmStat || mmStat.isDirectory) continue;
+
+            // Reuse the same precedence as getMimeType() — built-in map + LMDB cache.
+            var mmDot = mmFs.lastIndexOf('.');
+            var mmExt = mmDot !== -1 ? mmFs.substring(mmDot + 1).toLowerCase() : '';
+            if (mmExt) {
+                var mmBuiltin = server.getMime(mmExt);
+                if (mmBuiltin) { mmMimes[mmDav] = mmBuiltin; continue; }
+            }
+            var mmMeta = getFileMeta(mmRel);
+            if (mmMeta && mmMeta.mimeType) { mmMimes[mmDav] = mmMeta.mimeType; continue; }
+
+            // Skip remote/FUSE mounts — `file` would be slow on them.
+            if (mmStat.dev !== DAV_ROOT_DEV) {
+                mmMimes[mmDav] = 'application/octet-stream';
+                continue;
+            }
+
+            mmDetectFs.push(mmFs);
+            mmDetectKey.push(mmDav);
+            mmDetectDav.push(mmRel);
+        }
+
+        // One shell invocation for everything that needs detection.
+        if (mmDetectFs.length) {
+            var mmCmd = 'file --mime-type -b';
+            for (var mmj = 0; mmj < mmDetectFs.length; mmj++) {
+                mmCmd += ' ' + _shellEscape(mmDetectFs[mmj]);
+            }
+            var mmOut = '';
+            try {
+                var mmRes = shell(mmCmd, {timeout: 30000});
+                mmOut = String(mmRes.stdout || '');
+            } catch(e) { /* leave outputs empty */ }
+            var mmLines = mmOut.split('\n');
+            for (var mmk = 0; mmk < mmDetectFs.length; mmk++) {
+                var mmLine = trim(mmLines[mmk] || '');
+                var mmType = (mmLine && mmLine.indexOf('/') !== -1) ? mmLine : 'application/octet-stream';
+                mmMimes[mmDetectKey[mmk]] = mmType;
+                // Cache for next listing
+                var mmMeta2 = ensureFileMeta(mmDetectDav[mmk], mmDetectFs[mmk]);
+                if (mmMeta2) {
+                    mmMeta2.mimeType = mmType;
+                    setFileMeta(mmDetectDav[mmk], mmMeta2);
+                }
+            }
+        }
+
+        return _attachCookie({ status: 200, json: {ok: true, mimes: mmMimes} }, mmUser);
     }
 
     // Search index status: GET /dav/_search/status?path=/aaron/somedir
