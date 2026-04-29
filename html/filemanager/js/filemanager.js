@@ -2484,6 +2484,15 @@ const Search = {
     return null;
   },
 
+  // True only when href is itself an indexed directory (not a descendant).
+  // Used by row/card/tree renderers to show the indexed badge.
+  isDirectlyIndexed(href) {
+    if (!Auth.searchDirs || !Auth.searchDirs.length || !href) return false;
+    var davPrefix = App.davUrl.replace(/\/$/, '');
+    var rel = href.replace(davPrefix, '').replace(/\/$/, '');
+    return Auth.searchDirs.indexOf(rel) !== -1;
+  },
+
   // Search button is always visible
   updateButton() {
     var btn = document.getElementById('search-btn');
@@ -3188,11 +3197,12 @@ const Tree = {
     // Try to load shared directory too
     try {
       const rootList = await DavClient.list(App.davUrl, 1);
-      rootList.forEach(item => {
-        if (!item.isSelf && item.isDir && item.name !== Auth.username) {
-          const node = this._createNode(item.name, item.href, 0);
-          this._container.appendChild(node);
-        }
+      const rootDirs = rootList
+        .filter(item => !item.isSelf && item.isDir && item.name !== Auth.username)
+        .sort((a, b) => a.name.toLowerCase().localeCompare(b.name.toLowerCase()));
+      rootDirs.forEach(item => {
+        const node = this._createNode(item.name, item.href, 0, item);
+        this._container.appendChild(node);
       });
     } catch (e) {
       // Non-admin may not be able to list root with all dirs
@@ -3203,7 +3213,7 @@ const Tree = {
     this.setActive(homeUrl);
   },
 
-  _createNode(name, href, level) {
+  _createNode(name, href, level, item) {
     const node = document.createElement('div');
     node.className = 'tree-node';
     node.dataset.href = href;
@@ -3216,6 +3226,9 @@ const Tree = {
     const arrow = document.createElement('span');
     arrow.className = 'tree-arrow';
 
+    const iconWrap = document.createElement('span');
+    iconWrap.className = 'tree-icon-wrap';
+
     const icon = document.createElement('span');
     var iconCls = 'icon-folder';
     if (name === 'trash') iconCls = 'icon-trash';
@@ -3226,13 +3239,27 @@ const Tree = {
     icon.className = 'icon ' + iconCls;
     icon.style.width = '16px';
     icon.style.height = '16px';
+    iconWrap.appendChild(icon);
+
+    if (item && item.shared) {
+      const shOv = document.createElement('span');
+      shOv.className = 'tree-shared-overlay';
+      shOv.title = 'Shared to web';
+      iconWrap.appendChild(shOv);
+    }
+    if (Search.isDirectlyIndexed(href)) {
+      const ixOv = document.createElement('span');
+      ixOv.className = 'tree-indexed-overlay';
+      ixOv.title = 'Search indexing enabled';
+      iconWrap.appendChild(ixOv);
+    }
 
     const label = document.createElement('span');
     label.className = 'tree-label';
     label.textContent = name;
 
     row.appendChild(arrow);
-    row.appendChild(icon);
+    row.appendChild(iconWrap);
     row.appendChild(label);
 
     const children = document.createElement('div');
@@ -3327,7 +3354,7 @@ const Tree = {
 
       dirs.forEach(item => {
         const childHref = item.href.replace(/\/?$/, '/');
-        const childNode = this._createNode(item.name, childHref, level);
+        const childNode = this._createNode(item.name, childHref, level, item);
         children.appendChild(childNode);
       });
     } catch (e) {
@@ -3824,6 +3851,12 @@ const FileList = {
             shBadge.title = 'Shared to web';
             nameDiv.appendChild(shBadge);
           }
+          if (item.isDir && Search.isDirectlyIndexed(item.href)) {
+            const ixBadge = document.createElement('span');
+            ixBadge.className = 'indexed-badge';
+            ixBadge.title = 'Search indexing enabled';
+            nameDiv.appendChild(ixBadge);
+          }
           td.appendChild(nameDiv);
           break;
         }
@@ -3981,6 +4014,12 @@ const FileList = {
         shareOverlay.className = 'shared-overlay';
         shareOverlay.title = 'Shared to web';
         thumb.appendChild(shareOverlay);
+      }
+      if (item.isDir && Search.isDirectlyIndexed(item.href)) {
+        const ixOverlay = document.createElement('span');
+        ixOverlay.className = 'indexed-overlay';
+        ixOverlay.title = 'Search indexing enabled';
+        thumb.appendChild(ixOverlay);
       }
 
       const label = document.createElement('span');
@@ -10686,6 +10725,9 @@ const App = {
             var sData = await sResp.json();
             if (sData.ok) Auth.searchDirs = sData.searchDirs || [];
             Search.updateButton();
+            // Re-render so the indexed badge appears/disappears in current view + tree
+            FileList.render();
+            Tree.refresh(FileList.currentPath);
           } else {
             Toast.error(data.error || 'Failed');
           }
