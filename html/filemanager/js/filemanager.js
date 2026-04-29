@@ -1175,6 +1175,16 @@ const WinManager = {
       opts.headerActions.forEach(function(a) { actionsEl.appendChild(a); });
     }
 
+    // Pin button — only shown while maximized; toggles header autohide
+    var pinBtn = document.createElement('button');
+    pinBtn.className = 'win-pin';
+    pinBtn.title = 'Pin titlebar (always visible)';
+    pinBtn.hidden = true;
+    pinBtn.addEventListener('click', function(e) {
+      e.stopPropagation();
+      self.togglePin(id);
+    });
+
     var minBtn = document.createElement('button');
     minBtn.className = 'win-minimize';
     minBtn.title = 'Minimize';
@@ -1190,6 +1200,7 @@ const WinManager = {
     closeBtn.title = 'Close';
     closeBtn.addEventListener('click', function() { self.close(id); });
 
+    header.appendChild(pinBtn);
     header.appendChild(titleEl);
     header.appendChild(actionsEl);
     header.appendChild(minBtn);
@@ -1258,10 +1269,12 @@ const WinManager = {
       headerEl: header,
       headerTrigger: headerTrigger,
       maxBtn: maxBtn,
+      pinBtn: pinBtn,
       body: body,
       type: opts.type || null,
       maximized: false,
       minimized: false,
+      pinned: false,
       onClose: opts.onClose || null,
       beforeClose: opts.beforeClose || null,
       _savedPos: null,
@@ -1269,10 +1282,12 @@ const WinManager = {
     };
     this._windows.set(id, winState);
 
-    // Viewer mode: start maximized, hide buttons, close = close tab
+    // Viewer mode: start maximized, hide buttons, close = close tab.
+    // Pin stays available so users can lock the titlebar for easier access.
     if (this._nextViewerMode) {
       winState.maximized = true;
       el.classList.add('win-maximized');
+      pinBtn.hidden = false;
       minBtn.hidden = true;
       maxBtn.hidden = true;
       header.style.cursor = 'default';
@@ -1395,6 +1410,7 @@ const WinManager = {
       };
       win.el.classList.add('win-maximized');
       win.headerEl.classList.remove('header-visible');
+      if (win.pinBtn) win.pinBtn.hidden = false;
     } else {
       win.el.classList.remove('win-maximized');
       if (win._savedPos) {
@@ -1405,8 +1421,29 @@ const WinManager = {
       }
       clearTimeout(win._headerHideTimer);
       win.headerEl.classList.remove('header-visible');
+      // Reset pin state when un-maximizing — pin only matters in maximized mode
+      win.pinned = false;
+      if (win.pinBtn) {
+        win.pinBtn.hidden = true;
+        win.pinBtn.classList.remove('pinned');
+        win.pinBtn.title = 'Pin titlebar (always visible)';
+      }
     }
     window.dispatchEvent(new Event('resize'));
+  },
+
+  togglePin(id) {
+    var win = this._windows.get(id);
+    if (!win || !win.maximized) return;
+    win.pinned = !win.pinned;
+    if (win.pinBtn) {
+      win.pinBtn.classList.toggle('pinned', win.pinned);
+      win.pinBtn.title = win.pinned ? 'Unpin titlebar (autohide)' : 'Pin titlebar (always visible)';
+    }
+    if (win.pinned) {
+      clearTimeout(win._headerHideTimer);
+      win.headerEl.classList.add('header-visible');
+    }
   },
 
   setTitle(id, text) {
@@ -1547,7 +1584,6 @@ const WinManager = {
   },
 
   _setupMaxHeaderHover(win) {
-    var self = this;
     win.headerTrigger.addEventListener('mouseenter', function() {
       if (!win.maximized) return;
       clearTimeout(win._headerHideTimer);
@@ -1558,13 +1594,13 @@ const WinManager = {
       clearTimeout(win._headerHideTimer);
     });
     win.headerEl.addEventListener('mouseleave', function() {
-      if (!win.maximized) return;
+      if (!win.maximized || win.pinned) return;
       win._headerHideTimer = setTimeout(function() {
         win.headerEl.classList.remove('header-visible');
       }, 1250);
     });
     win.headerTrigger.addEventListener('mouseleave', function() {
-      if (!win.maximized) return;
+      if (!win.maximized || win.pinned) return;
       win._headerHideTimer = setTimeout(function() {
         win.headerEl.classList.remove('header-visible');
       }, 1250);
@@ -8677,7 +8713,7 @@ const App = {
       return;
     }
 
-    // Fetch settings for theme
+    // Fetch settings for theme + per-viewer scheme (terminal needs termTheme too)
     try {
       var settingsResp = await fetch(this.davUrl + '_settings', {credentials: 'same-origin'});
       var settingsData = await settingsResp.json();
@@ -8685,6 +8721,7 @@ const App = {
         Auth.admin = !!settingsData.admin;
         Auth.theme = settingsData.theme || 'auto';
         Auth.cmTheme = settingsData.cmTheme || 'auto';
+        Auth.termTheme = settingsData.termTheme || 'auto';
         this.applyTheme(Auth.theme);
       }
     } catch(e) {}

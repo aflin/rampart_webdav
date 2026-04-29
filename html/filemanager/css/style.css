@@ -1437,7 +1437,7 @@ tr.drop-target-copy td:last-child::after {
   background: var(--color-bg);
   border-bottom: 1px solid var(--color-border-light);
   transform: translateY(-100%);
-  transition: transform 0.2s ease;
+  transition: transform 0.2s ease, opacity 0.2s ease;
   pointer-events: none;
   opacity: 0;
 }
@@ -1598,7 +1598,7 @@ tr.drop-target-copy td:last-child::after {
   background: var(--color-bg);
   border-bottom: 1px solid var(--color-border-light);
   transform: translateY(-100%);
-  transition: transform 0.2s ease;
+  transition: transform 0.2s ease, opacity 0.2s ease;
   pointer-events: none;
   opacity: 0;
 }
@@ -1689,6 +1689,7 @@ tr.drop-target-copy td:last-child::after {
   gap: var(--space-xs);
 }
 
+.win-pin,
 .win-minimize,
 .win-maximize,
 .win-close {
@@ -1702,9 +1703,30 @@ tr.drop-target-copy td:last-child::after {
   flex-shrink: 0;
 }
 
+.win-pin:hover,
 .win-minimize:hover,
 .win-maximize:hover,
 .win-close:hover { background: var(--color-bg-hover); }
+
+/* Pushpin icon: outline pin tilted (not pinned) → upright + accent (pinned) */
+.win-pin::after {
+  content: '';
+  display: block;
+  width: 14px;
+  height: 14px;
+  background-color: var(--color-fg-secondary);
+  -webkit-mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M12 17v5'/%3E%3Cpath d='M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z'/%3E%3C/svg%3E");
+  mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M12 17v5'/%3E%3Cpath d='M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z'/%3E%3C/svg%3E");
+  -webkit-mask-size: contain;
+  mask-size: contain;
+  transform: rotate(35deg);
+  transition: transform 0.15s ease, background-color 0.15s ease;
+}
+
+.win-pin.pinned::after {
+  background-color: var(--color-accent);
+  transform: rotate(0deg);
+}
 
 /* Minimize icon: horizontal line */
 .win-minimize::after {
