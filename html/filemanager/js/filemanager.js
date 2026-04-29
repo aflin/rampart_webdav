@@ -3340,6 +3340,69 @@ const Tree = {
 
 
 /* -----------------------------------------------------------------------
+ * Section 6b: Input — mouse/touch routing
+ *
+ * isMobile is decided once at load: "mobile" means no fine pointer is
+ * available anywhere on the device. A Surface, iPad with Magic Keyboard
+ * trackpad, or any laptop with a paired mouse reports any-pointer:fine
+ * and stays on desktop UX. Phones and tablets with no peripherals
+ * resolve to mobile UX.
+ *
+ * Only handlers that DIFFER between desktop and mobile live here — shared
+ * destinations (App.showContextMenu, FileList._openItem, DragDrop, etc.)
+ * stay where they are. This section is purely the routing layer.
+ * ----------------------------------------------------------------------- */
+
+const Input = {
+  // Primary pointer is coarse ⇒ user is interacting via touch. We deliberately
+  // ignore any-pointer/any-hover here: some Android Chrome builds flip those queries
+  // depending on whether USB debugging is attached (observed bug), but the primary
+  // `pointer:` query stays accurate. Surface in laptop mode reports pointer:fine
+  // (desktop UX); in tablet mode it reports pointer:coarse (mobile UX) — matching
+  // how the user is currently interacting.
+  isMobile: window.matchMedia('(pointer: coarse)').matches,
+
+  // Wire selection / open / context-menu handlers on a file-list row or grid card.
+  // checkboxSel matches the checkbox or its container so clicks there fall through.
+  // getIdx() returns the current index of `item` at click time (forms shift on filter).
+  attachItemEvents(el, item, getIdx, checkboxSel) {
+    const onChk = (e) => checkboxSel && e.target.closest(checkboxSel);
+    if (this.isMobile) {
+      el.addEventListener('click', (e) => {
+        if (onChk(e)) return;
+        FileList._openItem(item);
+      });
+    } else {
+      el.addEventListener('dblclick', (e) => {
+        if (onChk(e)) return;
+        FileList._openItem(item);
+      });
+      el.addEventListener('click', (e) => {
+        if (onChk(e)) return;
+        e.preventDefault();
+        FileList._handleRowClick(item.href, getIdx(), e);
+      });
+    }
+    // contextmenu fires from right-click on desktop and from native long-press
+    // on touch — provided nothing (e.g. HTML5 drag) intercepts first. We don't
+    // call makeDraggable on mobile, which keeps Chrome Android's long-press path clear.
+    el.addEventListener('contextmenu', (e) => {
+      e.preventDefault();
+      App.showContextMenu(e, item);
+    });
+  },
+
+  // Make an element a drag source. No-op on mobile (HTML5 drag-drop has no
+  // touch bridge in Chrome Android, and setting draggable=true preempts long-press).
+  makeDraggable(el, item) {
+    if (this.isMobile) return;
+    DragDrop.makeSource(el, item);
+  }
+};
+
+
+
+/* -----------------------------------------------------------------------
  * Section 7: FileList — Detail table and grid view with sorting
  * ----------------------------------------------------------------------- */
 
@@ -3353,7 +3416,6 @@ const FileList = {
   _container: null,
   _lastClickIndex: -1,
   _arrowAnchor: -1,
-  _isMobile: window.matchMedia('(pointer: coarse)').matches && ('ontouchstart' in window),
   _colWidths: {},  // persisted column widths { colKey: px }
 
   // All possible columns — name is always visible
@@ -3669,6 +3731,7 @@ const FileList = {
     check.type = 'checkbox';
     check.className = 'file-check';
     check.checked = this.selected.has(item.href);
+    check.addEventListener('click', (e) => { e.stopPropagation(); });
     check.addEventListener('change', (e) => {
       e.stopPropagation();
       this.toggleItemSelection(item.href, check.checked, idx, e);
@@ -3753,28 +3816,8 @@ const FileList = {
       tr.appendChild(td);
     }
 
-    // Double click to open
-    tr.addEventListener('dblclick', (e) => {
-      if (e.target.closest('.col-check')) return;
-      this._openItem(item);
-    });
-
-    // Single click: desktop = select row, mobile = keep checkbox behavior
-    tr.addEventListener('click', (e) => {
-      if (e.target.closest('.col-check')) return; // checkbox handles itself
-      if (this._isMobile) return; // mobile uses checkboxes
-      e.preventDefault();
-      this._handleRowClick(item.href, idx, e);
-    });
-
-    // Context menu
-    tr.addEventListener('contextmenu', (e) => {
-      e.preventDefault();
-      App.showContextMenu(e, item);
-    });
-
-    // Drag source
-    DragDrop.makeSource(tr, item);
+    Input.attachItemEvents(tr, item, () => idx, '.col-check');
+    Input.makeDraggable(tr, item);
     // Drop target (directories only)
     if (item.isDir) DragDrop.makeTarget(tr, item.href);
 
@@ -3844,6 +3887,8 @@ const FileList = {
       check.type = 'checkbox';
       check.className = 'file-check grid-check';
       check.checked = this.selected.has(item.href);
+      // Stop click from bubbling so the card's open handler doesn't fire when toggling.
+      check.addEventListener('click', (e) => { e.stopPropagation(); });
       check.addEventListener('change', (e) => {
         e.stopPropagation();
         this.toggleItemSelection(item.href, check.checked, realIdx, e);
@@ -3915,23 +3960,8 @@ const FileList = {
       card.appendChild(thumb);
       card.appendChild(label);
 
-      card.addEventListener('dblclick', (e) => {
-        if (e.target === check) return;
-        this._openItem(item);
-      });
-      card.addEventListener('click', (e) => {
-        if (e.target === check) return;
-        if (this._isMobile) return;
-        e.preventDefault();
-        this._handleRowClick(item.href, realIdx, e);
-      });
-      card.addEventListener('contextmenu', (e) => {
-        e.preventDefault();
-        App.showContextMenu(e, item);
-      });
-
-      // Drag source + drop target (directories)
-      DragDrop.makeSource(card, item);
+      Input.attachItemEvents(card, item, () => realIdx, '.grid-check');
+      Input.makeDraggable(card, item);
       if (item.isDir) DragDrop.makeTarget(card, item.href);
 
       grid.appendChild(card);
@@ -4653,7 +4683,7 @@ const Toolbar = {
     document.getElementById('newfile-btn').addEventListener('click', () => App.newFile());
     document.getElementById('empty-trash-btn').addEventListener('click', () => App._emptyTrash());
     document.getElementById('terminal-btn').addEventListener('click', () => App.openTerminal());
-    document.getElementById('vnc-btn').addEventListener('click', () => App.openVnc());
+    document.getElementById('remote-btn').addEventListener('click', () => App.openRemote());
     document.getElementById('settings-btn').addEventListener('click', () => App.openSettings());
     document.getElementById('logout-btn').addEventListener('click', () => Auth.logout());
 
@@ -8602,6 +8632,7 @@ const App = {
     var params = new URLSearchParams(window.location.search);
     var file = params.get('file');
     var vnc = params.get('vnc');
+    var rdp = params.get('rdp');
     var term = params.get('term');
     if (file) {
       this._viewerMode = true;
@@ -8611,6 +8642,14 @@ const App = {
       this._viewerVnc = vnc;
       this._viewerVncPass = params.get('vncpass') || '';
       this._viewerVncUser = params.get('vncuser') || '';
+    } else if (rdp) {
+      this._viewerMode = true;
+      this._viewerRdp = rdp;
+      this._viewerRdpPass = params.get('rdppass') || '';
+      this._viewerRdpUser = params.get('rdpuser') || '';
+      this._viewerRdpRes  = params.get('rdpres')  || '';
+      // rdpaudio=0 disables audio; absent or any other value = enabled.
+      this._viewerRdpAudio = params.get('rdpaudio') !== '0';
     } else if (term) {
       this._viewerMode = true;
       this._viewerTerm = term;
@@ -8660,6 +8699,13 @@ const App = {
       var vncPort = parts[1] || '5900';
       document.title = 'VNC — ' + vncHost + ':' + vncPort;
       this._openVncSession(vncHost, vncPort, this._viewerVncPass, this._viewerVncUser);
+    } else if (this._viewerRdp) {
+      // RDP mode
+      var rparts = this._viewerRdp.split(':');
+      var rdpHost = rparts[0] || 'localhost';
+      var rdpPort = rparts[1] || '3389';
+      document.title = 'RDP — ' + rdpHost + ':' + rdpPort;
+      this._openRdpSession(rdpHost, rdpPort, this._viewerRdpPass, this._viewerRdpUser, this._viewerRdpRes, this._viewerRdpAudio);
     } else if (this._viewerTerm) {
       // Terminal mode
       document.title = 'Terminal — ' + this._viewerTerm;
@@ -8905,7 +8951,7 @@ const App = {
         Auth.groups = settingsData.userGroups || [];
         Auth.admin = !!settingsData.admin;
         Auth.terminal = !!settingsData.terminal;
-        Auth.vnc = !!settingsData.vnc;
+        Auth.remote = !!settingsData.remote;
         Auth.termTheme = settingsData.termTheme || 'auto';
         Auth.cmTheme = settingsData.cmTheme || 'auto';
         Auth.ooAutosave = typeof settingsData.ooAutosave === 'boolean' ? settingsData.ooAutosave : true;
@@ -8918,7 +8964,7 @@ const App = {
         Auth.theme = settingsData.theme || 'auto';
         this.applyTheme(Auth.theme);
         document.getElementById('terminal-btn').hidden = !settingsData.terminal;
-        document.getElementById('vnc-btn').hidden = !settingsData.vnc;
+        document.getElementById('remote-btn').hidden = !settingsData.remote;
       }
     } catch (e) {}
 
@@ -9070,20 +9116,46 @@ const App = {
     Tree.revealPath(path);
   },
 
-  // VNC Remote Desktop
-  async openVnc() {
-    var wrap = document.createElement('div');
-    wrap.style.cssText = 'display:flex;flex-direction:column;gap:8px';
+  // Thin wrappers — both open the same tabbed Remote Desktop dialog.
+  openRemote() { return this._openRemoteDesktop('vnc'); },
 
-    // Load history: array of {host, port} in MRU order
+  // Build a single connect form (host / port / user / pass) with history dropdown.
+  // Returns a handle with {panel, focus, getValues, saveToHistory, requirePassword}.
+  _buildRemoteForm(type) {
+    var cfg = {
+      vnc: {
+        defaultPort: '5900',
+        historyKey: 'vncHistory',
+        hostLabel: 'VNC Host',
+        portLabel: 'VNC Port',
+        userLabel: 'Username (for macOS, leave blank for standard VNC)',
+        passLabel: 'Password',
+        passPlaceholder: 'VNC password',
+        requirePassword: true
+      },
+      rdp: {
+        defaultPort: '3389',
+        historyKey: 'rdpHistory',
+        hostLabel: 'RDP Host',
+        portLabel: 'RDP Port',
+        userLabel: 'Username',
+        passLabel: 'Password',
+        passPlaceholder: 'RDP password',
+        requireUsername: true,
+        requirePassword: true
+      }
+    }[type];
+
+    var panel = document.createElement('div');
+    panel.style.cssText = 'display:flex;flex-direction:column;gap:8px';
+
     var history;
-    try { history = JSON.parse(localStorage.getItem('vncHistory') || '[]'); }
+    try { history = JSON.parse(localStorage.getItem(cfg.historyKey) || '[]'); }
     catch(e) { history = []; }
     if (!Array.isArray(history)) history = [];
 
     var hostLabel = document.createElement('label');
-    hostLabel.textContent = 'VNC Host';
-    // Wrap hostInput so the dropdown can be positioned relative to it
+    hostLabel.textContent = cfg.hostLabel;
     var hostWrap = document.createElement('div');
     hostWrap.style.cssText = 'position:relative';
     var hostInput = document.createElement('input');
@@ -9095,14 +9167,13 @@ const App = {
     hostWrap.appendChild(hostInput);
 
     var portLabel = document.createElement('label');
-    portLabel.textContent = 'VNC Port';
+    portLabel.textContent = cfg.portLabel;
     var portInput = document.createElement('input');
     portInput.type = 'text';
     portInput.className = 'dialog-input';
-    portInput.value = history.length ? history[0].port : '5900';
-    portInput.placeholder = '5900';
+    portInput.value = history.length ? history[0].port : cfg.defaultPort;
+    portInput.placeholder = cfg.defaultPort;
 
-    // Custom history dropdown — shows host:port on one line, fills both fields on click
     var histDrop = document.createElement('div');
     histDrop.style.cssText = 'position:absolute;left:0;right:0;top:100%;z-index:10000;' +
       'background:var(--menu-bg, #fff);color:var(--text, #000);' +
@@ -9140,7 +9211,7 @@ const App = {
         row.addEventListener('mouseenter', function() { highlightHistRow(i); });
         row.addEventListener('mouseleave', function() { highlightHistRow(-1); });
         row.addEventListener('mousedown', function(e) {
-          e.preventDefault(); // keep focus on input
+          e.preventDefault();
           applyHistRow(h);
         });
         histDrop.appendChild(row);
@@ -9156,7 +9227,6 @@ const App = {
       setTimeout(function() { histDrop.style.display = 'none'; histActiveIdx = -1; }, 150);
     });
     hostInput.addEventListener('keydown', function(e) {
-      // ArrowDown reopens the dropdown when it's hidden
       if (histDrop.style.display === 'none') {
         if (e.key === 'ArrowDown' && history.length) {
           e.preventDefault();
@@ -9174,7 +9244,7 @@ const App = {
         highlightHistRow(histActiveIdx > 0 ? histActiveIdx - 1 : n - 1);
       } else if (e.key === 'Enter' && histActiveIdx >= 0) {
         e.preventDefault();
-        e.stopPropagation(); // don't trigger Connect
+        e.stopPropagation();
         applyHistRow(history[histActiveIdx]);
       } else if (e.key === 'Escape') {
         histDrop.style.display = 'none';
@@ -9183,7 +9253,7 @@ const App = {
     });
 
     var userLabel = document.createElement('label');
-    userLabel.textContent = 'Username (for macOS, leave blank for standard VNC)';
+    userLabel.textContent = cfg.userLabel;
     var userInput = document.createElement('input');
     userInput.type = 'text';
     userInput.className = 'dialog-input';
@@ -9191,20 +9261,142 @@ const App = {
     userInput.autocomplete = 'off';
 
     var passLabel = document.createElement('label');
-    passLabel.textContent = 'Password';
+    passLabel.textContent = cfg.passLabel;
     var passInput = document.createElement('input');
     passInput.type = 'password';
     passInput.className = 'dialog-input';
-    passInput.placeholder = 'VNC password';
+    passInput.placeholder = cfg.passPlaceholder;
 
-    wrap.appendChild(hostLabel);
-    wrap.appendChild(hostWrap);
-    wrap.appendChild(portLabel);
-    wrap.appendChild(portInput);
-    wrap.appendChild(userLabel);
-    wrap.appendChild(userInput);
-    wrap.appendChild(passLabel);
-    wrap.appendChild(passInput);
+    // Resolution picker — RDP only.
+    var resolutions = [
+      '1024x768', '1152x864', '1280x720', '1280x800', '1280x1024',
+      '1366x768', '1440x900', '1600x900',  '1680x1050',
+      '1920x1080', '1920x1200',
+      '2560x1440', '2560x1600',
+      '3840x2160'
+    ];
+    var resLabel = null, resSelect = null;
+    var audioWrap = null, audioCheckbox = null;
+    if (type === 'rdp') {
+      resLabel = document.createElement('label');
+      resLabel.textContent = 'Resolution';
+      resSelect = document.createElement('select');
+      resSelect.className = 'dialog-input';
+      resolutions.forEach(function(r) {
+        var opt = document.createElement('option');
+        opt.value = r;
+        opt.textContent = r;
+        resSelect.appendChild(opt);
+      });
+      // Default depends on host: if history has a saved resolution, use it;
+      // otherwise 1920x1080.
+      var defaultRes = (history.length && history[0].res) || '1920x1080';
+      resSelect.value = defaultRes;
+
+      audioWrap = document.createElement('label');
+      audioWrap.style.cssText = 'display:flex;align-items:center;gap:6px;margin-top:4px;cursor:pointer';
+      audioCheckbox = document.createElement('input');
+      audioCheckbox.type = 'checkbox';
+      // Default on unless explicitly saved off for this host.
+      var savedAudio = (history.length && typeof history[0].audio === 'boolean') ? history[0].audio : true;
+      audioCheckbox.checked = savedAudio;
+      audioWrap.appendChild(audioCheckbox);
+      audioWrap.appendChild(document.createTextNode('Enable audio'));
+
+      // When host input changes to a known host, load that host's last res/audio.
+      hostInput.addEventListener('change', function() {
+        var m = history.find(function(h) { return h.host === hostInput.value.trim(); });
+        if (m && m.res) resSelect.value = m.res;
+        if (m && typeof m.audio === 'boolean') audioCheckbox.checked = m.audio;
+      });
+    }
+
+    panel.appendChild(hostLabel);
+    panel.appendChild(hostWrap);
+    panel.appendChild(portLabel);
+    panel.appendChild(portInput);
+    panel.appendChild(userLabel);
+    panel.appendChild(userInput);
+    panel.appendChild(passLabel);
+    panel.appendChild(passInput);
+    if (resLabel)  panel.appendChild(resLabel);
+    if (resSelect) panel.appendChild(resSelect);
+    if (audioWrap) panel.appendChild(audioWrap);
+
+    return {
+      panel: panel,
+      passInput: passInput,
+      userInput: userInput,
+      requirePassword: cfg.requirePassword,
+      requireUsername: cfg.requireUsername,
+      focus: function() { hostInput.focus(); hostInput.select(); },
+      getValues: function() {
+        var vals = {
+          host: hostInput.value.trim() || 'localhost',
+          port: portInput.value.trim() || cfg.defaultPort,
+          username: userInput.value.trim(),
+          password: passInput.value
+        };
+        if (resSelect)     vals.resolution = resSelect.value;
+        if (audioCheckbox) vals.audio      = audioCheckbox.checked;
+        return vals;
+      },
+      saveToHistory: function(vals) {
+        history = history.filter(function(h) { return h.host !== vals.host; });
+        var entry = {host: vals.host, port: vals.port};
+        if (vals.resolution)          entry.res   = vals.resolution;
+        if (typeof vals.audio === 'boolean') entry.audio = vals.audio;
+        history.unshift(entry);
+        if (history.length > 10) history.length = 10;
+        localStorage.setItem(cfg.historyKey, JSON.stringify(history));
+      }
+    };
+  },
+
+  // Tabbed Remote Desktop dialog — wraps a noVNC form and an RDP form.
+  async _openRemoteDesktop(initialTab) {
+    initialTab = initialTab || 'vnc';
+
+    var wrap = document.createElement('div');
+    wrap.style.cssText = 'display:flex;flex-direction:column';
+
+    // Tab bar
+    var tabBar = document.createElement('div');
+    tabBar.style.cssText = 'display:flex;border-bottom:1px solid var(--border, #ccc);margin-bottom:12px';
+    var tabBtnBaseCss = 'padding:8px 16px;cursor:pointer;background:transparent;' +
+      'border:none;color:var(--text, #000);font-size:14px;' +
+      'border-bottom:2px solid transparent;margin-bottom:-1px';
+    var tabBtnActiveCss = tabBtnBaseCss + ';border-bottom-color:var(--color-primary, #4a90e2);font-weight:bold';
+
+    var vncTabBtn = document.createElement('button');
+    vncTabBtn.type = 'button';
+    vncTabBtn.textContent = 'noVNC';
+    var rdpTabBtn = document.createElement('button');
+    rdpTabBtn.type = 'button';
+    rdpTabBtn.textContent = 'RDP';
+    tabBar.appendChild(vncTabBtn);
+    tabBar.appendChild(rdpTabBtn);
+    wrap.appendChild(tabBar);
+
+    var vncForm = this._buildRemoteForm('vnc');
+    var rdpForm = this._buildRemoteForm('rdp');
+    wrap.appendChild(vncForm.panel);
+    wrap.appendChild(rdpForm.panel);
+
+    var activeTab = initialTab;
+
+    function setTab(tab) {
+      activeTab = tab;
+      var isVnc = (tab === 'vnc');
+      vncTabBtn.style.cssText = isVnc ? tabBtnActiveCss : tabBtnBaseCss;
+      rdpTabBtn.style.cssText = isVnc ? tabBtnBaseCss : tabBtnActiveCss;
+      vncForm.panel.style.display = isVnc ? '' : 'none';
+      rdpForm.panel.style.display = isVnc ? 'none' : '';
+      var form = isVnc ? vncForm : rdpForm;
+      setTimeout(function() { form.focus(); }, 0);
+    }
+    vncTabBtn.addEventListener('click', function() { setTab('vnc'); });
+    rdpTabBtn.addEventListener('click', function() { setTab('rdp'); });
 
     var self = this;
     var confirmed = await new Promise(function(resolve) {
@@ -9212,7 +9404,20 @@ const App = {
       connectBtn.className = 'btn btn-primary btn-sm';
       connectBtn.textContent = 'Connect';
       connectBtn.style.marginTop = '8px';
+      function validateActiveForm() {
+        var form = (activeTab === 'vnc') ? vncForm : rdpForm;
+        if (form.requireUsername && !form.userInput.value.trim()) {
+          form.userInput.focus();
+          return false;
+        }
+        if (form.requirePassword && !form.passInput.value) {
+          form.passInput.focus();
+          return false;
+        }
+        return true;
+      }
       connectBtn.addEventListener('click', function() {
+        if (!validateActiveForm()) return;
         resolve('connect');
         Dialog.close();
       });
@@ -9221,44 +9426,49 @@ const App = {
       newTabBtn.textContent = 'Connect and Open in New Tab';
       newTabBtn.style.marginTop = '8px';
       newTabBtn.addEventListener('click', function() {
+        if (!validateActiveForm()) return;
         resolve('newtab');
         Dialog.close();
       });
-      // Enter in any input submits Connect when password is filled in
       wrap.addEventListener('keydown', function(e) {
         if (e.key !== 'Enter') return;
-        if (!passInput.value) return;
+        if (!validateActiveForm()) return;
         e.preventDefault();
         connectBtn.click();
       });
       wrap.appendChild(connectBtn);
       wrap.appendChild(newTabBtn);
-      Dialog.open('VNC Remote Desktop', wrap);
-      setTimeout(function() { hostInput.focus(); hostInput.select(); }, 0);
+      Dialog.open('Remote Desktop', wrap);
+      setTab(initialTab);
     });
 
     if (!confirmed) return;
 
-    var host = hostInput.value.trim() || 'localhost';
-    var port = portInput.value.trim() || '5900';
-    var username = userInput.value.trim();
-    var password = passInput.value;
+    var form = (activeTab === 'vnc') ? vncForm : rdpForm;
+    var vals = form.getValues();
+    form.saveToHistory(vals);
 
-    // Update history: move/add to front, dedupe by host, cap at 10
-    history = history.filter(function(h) { return h.host !== host; });
-    history.unshift({host: host, port: port});
-    if (history.length > 10) history.length = 10;
-    localStorage.setItem('vncHistory', JSON.stringify(history));
-
-    if (confirmed === 'newtab') {
-      var vncParams = '?vnc=' + encodeURIComponent(host) + ':' + encodeURIComponent(port) +
-        (password ? '&vncpass=' + encodeURIComponent(password) : '') +
-        (username ? '&vncuser=' + encodeURIComponent(username) : '');
-      window.open(window.location.pathname + vncParams, '_blank');
-      return;
+    if (activeTab === 'vnc') {
+      if (confirmed === 'newtab') {
+        var vncParams = '?vnc=' + encodeURIComponent(vals.host) + ':' + encodeURIComponent(vals.port) +
+          (vals.password ? '&vncpass=' + encodeURIComponent(vals.password) : '') +
+          (vals.username ? '&vncuser=' + encodeURIComponent(vals.username) : '');
+        window.open(window.location.pathname + vncParams, '_blank');
+        return;
+      }
+      this._openVncSession(vals.host, vals.port, vals.password, vals.username);
+    } else {
+      if (confirmed === 'newtab') {
+        var rdpParams = '?rdp=' + encodeURIComponent(vals.host) + ':' + encodeURIComponent(vals.port) +
+          (vals.password ? '&rdppass=' + encodeURIComponent(vals.password) : '') +
+          (vals.username ? '&rdpuser=' + encodeURIComponent(vals.username) : '') +
+          (vals.resolution ? '&rdpres='  + encodeURIComponent(vals.resolution) : '') +
+          (vals.audio === false ? '&rdpaudio=0' : '');
+        window.open(window.location.pathname + rdpParams, '_blank');
+        return;
+      }
+      this._openRdpSession(vals.host, vals.port, vals.password, vals.username, vals.resolution, vals.audio);
     }
-
-    this._openVncSession(host, port, password, username);
   },
 
   _openVncSession(host, port, password, username) {
@@ -9539,6 +9749,360 @@ const App = {
     document.body.appendChild(script);
   },
 
+  // RDP session — IronRDP WASM client + Rampart RDCleanPath proxy at
+  // /wsapps/rdp/rdp.js. The WASM client handles RDP protocol, TLS, and
+  // rendering to a canvas. We just give it credentials and a target.
+  _openRdpSession(host, port, password, username, resolution, audio) {
+    // audio defaults to true if caller passed undefined (back-compat with
+    // older callers that predate the checkbox).
+    if (audio === undefined) audio = true;
+    var audioEnabled = !!audio;
+    var containerId = 'rdp-container-' + Date.now();
+    // Parse "WxH" resolution; fall back to 1920x1080 if malformed/missing.
+    var resW = 1920, resH = 1080;
+    if (resolution && /^\d+x\d+$/.test(resolution)) {
+      var rp = resolution.split('x');
+      resW = parseInt(rp[0], 10) || 1920;
+      resH = parseInt(rp[1], 10) || 1080;
+    }
+    var container = document.createElement('div');
+    container.id = containerId;
+    container.style.cssText = 'width:100%;height:100%;background:#000;' +
+      'display:flex;flex-direction:column;align-items:center;justify-content:center;' +
+      'position:relative;overflow:hidden';
+
+    // Status overlay shown until connection succeeds or fails.
+    var status = document.createElement('div');
+    status.id = containerId + '-status';
+    status.style.cssText = 'position:absolute;inset:0;display:flex;align-items:center;' +
+      'justify-content:center;color:#ddd;font-family:sans-serif;padding:32px;' +
+      'text-align:center;pointer-events:none;z-index:2';
+    status.textContent = 'Loading RDP client…';
+    container.appendChild(status);
+
+    // Canvas is drawn by IronRDP at the server's actual rendering size
+    // (1:1 pixel-accurate, so bitmaps are never upscaled in the draw path).
+    // A wrapper div around it is then CSS-transformed to fit the window,
+    // giving crisp GPU scaling for the display without resampling the
+    // canvas pixels themselves.
+    var canvas = document.createElement('canvas');
+    canvas.id = containerId + '-canvas';
+    canvas.width  = resW;
+    canvas.height = resH;
+    canvas.style.cssText = 'display:block';
+    canvas.tabIndex = 0;
+
+    var rdpWrap = document.createElement('div');
+    rdpWrap.style.cssText = 'position:absolute;top:0;left:0;' +
+      'transform-origin:top left';
+    rdpWrap.appendChild(canvas);
+    container.appendChild(rdpWrap);
+
+    // Recompute the scale so the wrapper fits the container while
+    // preserving aspect ratio. Called after connect (when canvas size is
+    // known) and on window/container resize.
+    function fitWrap() {
+      var cw = container.clientWidth  || 1;
+      var ch = container.clientHeight || 1;
+      var bw = canvas.width  || 1;
+      var bh = canvas.height || 1;
+      var s  = Math.min(cw / bw, ch / bh);
+      rdpWrap.style.transform = 'scale(' + s + ')';
+      // Center within container (flex centering works on the scaled rect).
+      var scaledW = bw * s;
+      var scaledH = bh * s;
+      rdpWrap.style.left = Math.max(0, (cw - scaledW) / 2) + 'px';
+      rdpWrap.style.top  = Math.max(0, (ch - scaledH) / 2) + 'px';
+    }
+    container._fitWrap = fitWrap;   // so onClose/resize handler can find it
+    new ResizeObserver(fitWrap).observe(container);
+
+    var winTitle = 'RDP — ' + host + ':' + port;
+    var sessionKey = 'rdp_session_' + containerId;
+
+    var winId = WinManager.open(winTitle, container, {
+      type: 'rdp', full: true, noPadding: true,
+      onClose: function() {
+        var s = window[sessionKey];
+        // Silence audio synchronously — the ws.close() 'close' event may
+        // not fire quickly enough and BufferSourceNodes already scheduled
+        // on the AudioContext would keep playing after the window is gone.
+        if (s && s.ws) {
+          try { s.ws._rdpAudioTeardown && s.ws._rdpAudioTeardown(); } catch(e) {}
+          try { s.ws.close(); } catch(e) {}
+        }
+        if (s) {
+          try { if (s.session && s.session.free) s.session.free(); } catch(e) {}
+          try { if (s.builder && s.builder.free) s.builder.free(); } catch(e) {}
+          window[sessionKey] = null;
+        }
+      }
+    });
+
+    // Build the proxy WebSocket URL. No query params — the WASM client's
+    // RDCleanPath Request PDU tells our proxy where to connect.
+    var scheme = location.protocol === 'https:' ? 'wss' : 'ws';
+    var wsUrl  = scheme + '://' + location.host + '/wsapps/rdp/rdp.js';
+
+    // IronRDP is an ES module with its own dependencies; load via a
+    // module script so `import` works. We pass parameters via window.*
+    // slots (escaping user strings for embedding in the script source is
+    // brittle; a named window slot is simpler and safe).
+    var paramKey = 'rdp_params_' + containerId;
+    window[paramKey] = {
+      destination: host + ':' + port,
+      proxyAddress: wsUrl,
+      username: username || '',
+      password: password || '',
+      canvas: canvas,
+      status: status,
+      sessionKey: sessionKey,
+      audioEnabled: audioEnabled
+    };
+
+    // Load the audio injector (classic script, globals on window.rdpAudio)
+    // before the module script runs so the wrapper is available when
+    // IronRDP constructs its WebSocket.
+    var audioScript = document.createElement('script');
+    audioScript.src = _L + 'rdp-audio.js';
+    audioScript.async = false;
+    document.head.appendChild(audioScript);
+
+    var script = document.createElement('script');
+    script.type = 'module';
+    script.textContent =
+      "// Intercept WebSocket construction → hand each new WS to our audio\n" +
+      "// injector so it can observe/modify the IronRDP protocol stream.\n" +
+      "var _OrigWS = window.WebSocket;\n" +
+      "var _P0 = window['" + paramKey + "'];\n" +
+      "var _audioOn = !!_P0.audioEnabled;\n" +
+      "function _WrappedWS(url, protos) {\n" +
+      "  var ws = protos ? new _OrigWS(url, protos) : new _OrigWS(url);\n" +
+      "  if (url && url.indexOf('/rdp/') >= 0 && window.rdpAudio && window.rdpAudio.wrapWebSocket) {\n" +
+      "    window.rdpAudio.wrapWebSocket(ws, { audio: _audioOn });\n" +
+      "    if (_P0) _P0.ws = ws;\n" +
+      "  }\n" +
+      "  return ws;\n" +
+      "}\n" +
+      "_WrappedWS.prototype = _OrigWS.prototype;\n" +
+      "_WrappedWS.CONNECTING = _OrigWS.CONNECTING;\n" +
+      "_WrappedWS.OPEN       = _OrigWS.OPEN;\n" +
+      "_WrappedWS.CLOSING    = _OrigWS.CLOSING;\n" +
+      "_WrappedWS.CLOSED     = _OrigWS.CLOSED;\n" +
+      "window.WebSocket = _WrappedWS;\n" +
+      "\n" +
+      "import init, { SessionBuilder, DesktopSize, DeviceEvent, InputTransaction, Extension, ClipboardData, IronErrorKind } from " +
+        "'./js/local/ironrdp/rdp_client.js';\n" +
+      "var P = window['" + paramKey + "'];\n" +
+      "var status = P.status;\n" +
+      "var canvas = P.canvas;\n" +
+      "function describeErr(e) {\n" +
+      "  if (!e) return 'unknown';\n" +
+      "  if (typeof e === 'string') return e;\n" +
+      "  if (e.message) return e.message;\n" +
+      "  if (typeof e.kind === 'function') {\n" +
+      "    try {\n" +
+      "      var k  = e.kind();\n" +
+      "      var kn = (IronErrorKind && IronErrorKind[k]) || ('kind=' + k);\n" +
+      "      var bt = '';\n" +
+      "      try { bt = e.backtrace(); } catch(_) {}\n" +
+      "      return kn + (bt ? ': ' + bt : '');\n" +
+      "    } catch(_) {}\n" +
+      "  }\n" +
+      "  try { return JSON.stringify(e); } catch(_) {}\n" +
+      "  return String(e);\n" +
+      "}\n" +
+      "function fail(msg) { status.textContent = 'RDP error: ' + msg; " +
+        "status.style.color = '#f88'; }\n" +
+      "\n" +
+      "// Keyboard scancode map (IBM Set 1) — code values from KeyboardEvent.code\n" +
+      "var SCANCODE = {\n" +
+      "  Escape:0x01, Digit1:0x02, Digit2:0x03, Digit3:0x04, Digit4:0x05, Digit5:0x06,\n" +
+      "  Digit6:0x07, Digit7:0x08, Digit8:0x09, Digit9:0x0A, Digit0:0x0B, Minus:0x0C,\n" +
+      "  Equal:0x0D, Backspace:0x0E, Tab:0x0F,\n" +
+      "  KeyQ:0x10, KeyW:0x11, KeyE:0x12, KeyR:0x13, KeyT:0x14, KeyY:0x15, KeyU:0x16,\n" +
+      "  KeyI:0x17, KeyO:0x18, KeyP:0x19, BracketLeft:0x1A, BracketRight:0x1B,\n" +
+      "  Enter:0x1C, ControlLeft:0x1D,\n" +
+      "  KeyA:0x1E, KeyS:0x1F, KeyD:0x20, KeyF:0x21, KeyG:0x22, KeyH:0x23, KeyJ:0x24,\n" +
+      "  KeyK:0x25, KeyL:0x26, Semicolon:0x27, Quote:0x28, Backquote:0x29,\n" +
+      "  ShiftLeft:0x2A, Backslash:0x2B,\n" +
+      "  KeyZ:0x2C, KeyX:0x2D, KeyC:0x2E, KeyV:0x2F, KeyB:0x30, KeyN:0x31, KeyM:0x32,\n" +
+      "  Comma:0x33, Period:0x34, Slash:0x35, ShiftRight:0x36,\n" +
+      "  NumpadMultiply:0x37, AltLeft:0x38, Space:0x39, CapsLock:0x3A,\n" +
+      "  F1:0x3B, F2:0x3C, F3:0x3D, F4:0x3E, F5:0x3F, F6:0x40, F7:0x41, F8:0x42,\n" +
+      "  F9:0x43, F10:0x44, F11:0x57, F12:0x58,\n" +
+      "  NumLock:0x45, ScrollLock:0x46,\n" +
+      "  Numpad7:0x47, Numpad8:0x48, Numpad9:0x49, NumpadSubtract:0x4A,\n" +
+      "  Numpad4:0x4B, Numpad5:0x4C, Numpad6:0x4D, NumpadAdd:0x4E,\n" +
+      "  Numpad1:0x4F, Numpad2:0x50, Numpad3:0x51, Numpad0:0x52, NumpadDecimal:0x53,\n" +
+      "  NumpadEnter:0xE01C, ControlRight:0xE01D, NumpadDivide:0xE035, PrintScreen:0xE037,\n" +
+      "  AltRight:0xE038, Home:0xE047, ArrowUp:0xE048, PageUp:0xE049,\n" +
+      "  ArrowLeft:0xE04B, ArrowRight:0xE04D, End:0xE04F, ArrowDown:0xE050,\n" +
+      "  PageDown:0xE051, Insert:0xE052, Delete:0xE053,\n" +
+      "  MetaLeft:0xE05B, MetaRight:0xE05C, ContextMenu:0xE05D, Pause:0xE11D45\n" +
+      "};\n" +
+      "\n" +
+      "function wireInputs(session) {\n" +
+      "  function apply(ev) {\n" +
+      "    try {\n" +
+      "      var tx = new InputTransaction();\n" +
+      "      tx.addEvent(ev);\n" +
+      "      session.applyInputs(tx);\n" +
+      "    } catch(e) { /* ignore per-event errors */ }\n" +
+      "  }\n" +
+      "\n" +
+      "  // Modifier state reconciliation. Browsers sometimes swallow the\n" +
+      "  // keydown for a lone modifier (notably ControlLeft) but still\n" +
+      "  // report e.ctrlKey/altKey/shiftKey/metaKey reliably on other\n" +
+      "  // events. Before dispatching any key, we compare the current\n" +
+      "  // modifier flags to what we've told the server and emit\n" +
+      "  // press/release events to bring them in sync.\n" +
+      "  var modState = { ctrl: false, shift: false, alt: false, meta: false };\n" +
+      "  var MOD_SC = { ctrl: 0x1D, shift: 0x2A, alt: 0x38, meta: 0xE05B };\n" +
+      "  function syncMods(e) {\n" +
+      "    ['ctrl','shift','alt','meta'].forEach(function(m) {\n" +
+      "      var want = !!e[m + 'Key'];\n" +
+      "      if (want && !modState[m]) {\n" +
+      "        apply(DeviceEvent.keyPressed(MOD_SC[m]));\n" +
+      "        modState[m] = true;\n" +
+      "      } else if (!want && modState[m]) {\n" +
+      "        apply(DeviceEvent.keyReleased(MOD_SC[m]));\n" +
+      "        modState[m] = false;\n" +
+      "      }\n" +
+      "    });\n" +
+      "  }\n" +
+      "  // Is e.code one of the keys we already treat as a modifier via MOD_SC?\n" +
+      "  // If so, syncMods covers it — skip the normal dispatch to avoid\n" +
+      "  // double-pressing or fighting with the reconciled state.\n" +
+      "  function isModifierCode(code) {\n" +
+      "    return code === 'ControlLeft' || code === 'ControlRight' ||\n" +
+      "           code === 'ShiftLeft'   || code === 'ShiftRight'   ||\n" +
+      "           code === 'AltLeft'     || code === 'AltRight'     ||\n" +
+      "           code === 'MetaLeft'    || code === 'MetaRight';\n" +
+      "  }\n" +
+      "  canvas.addEventListener('keydown', function(e) {\n" +
+      "    if (window._rdpKeyLog) console.log('[rdp-key] down ' + e.code + ' ctrl=' + e.ctrlKey + ' alt=' + e.altKey + ' shift=' + e.shiftKey);\n" +
+      "    e.preventDefault(); e.stopPropagation();\n" +
+      "    syncMods(e);\n" +
+      "    if (isModifierCode(e.code)) return;\n" +
+      "    var sc = SCANCODE[e.code];\n" +
+      "    if (sc === undefined) return;\n" +
+      "    apply(DeviceEvent.keyPressed(sc));\n" +
+      "  });\n" +
+      "  canvas.addEventListener('keyup', function(e) {\n" +
+      "    if (window._rdpKeyLog) console.log('[rdp-key] up   ' + e.code + ' ctrl=' + e.ctrlKey);\n" +
+      "    e.preventDefault(); e.stopPropagation();\n" +
+      "    syncMods(e);\n" +
+      "    if (isModifierCode(e.code)) return;\n" +
+      "    var sc = SCANCODE[e.code];\n" +
+      "    if (sc === undefined) return;\n" +
+      "    apply(DeviceEvent.keyReleased(sc));\n" +
+      "  });\n" +
+      "  canvas.addEventListener('mousemove', function(e) {\n" +
+      "    syncMods(e);\n" +
+      "    var r = canvas.getBoundingClientRect();\n" +
+      "    var sx = canvas.width / r.width, sy = canvas.height / r.height;\n" +
+      "    var x = Math.round((e.clientX - r.left) * sx);\n" +
+      "    var y = Math.round((e.clientY - r.top)  * sy);\n" +
+      "    apply(DeviceEvent.mouseMove(x, y));\n" +
+      "  });\n" +
+      "  canvas.addEventListener('mousedown', function(e) {\n" +
+      "    syncMods(e);\n" +
+      "    e.preventDefault(); canvas.focus();\n" +
+      "    apply(DeviceEvent.mouseButtonPressed(e.button));\n" +
+      "  });\n" +
+      "  canvas.addEventListener('mouseup', function(e) {\n" +
+      "    syncMods(e);\n" +
+      "    e.preventDefault();\n" +
+      "    apply(DeviceEvent.mouseButtonReleased(e.button));\n" +
+      "  });\n" +
+      "  canvas.addEventListener('wheel', function(e) {\n" +
+      "    e.preventDefault();\n" +
+      "    if (e.deltaY !== 0) apply(DeviceEvent.wheelRotations(true,  e.deltaY > 0 ? -1 : 1, 1));\n" +
+      "    if (e.deltaX !== 0) apply(DeviceEvent.wheelRotations(false, e.deltaX > 0 ? -1 : 1, 1));\n" +
+      "  }, { passive: false });\n" +
+      "  canvas.addEventListener('contextmenu', function(e) { e.preventDefault(); });\n" +
+      "}\n" +
+      "\n" +
+      "(async function() {\n" +
+      "  try {\n" +
+      "    status.textContent = 'Loading WebAssembly…';\n" +
+      "    await init();\n" +
+      "    status.textContent = 'Connecting to ' + P.destination + ' at ' + canvas.width + 'x' + canvas.height + '…';\n" +
+      "    var builder = new SessionBuilder();\n" +
+      "    builder.destination(P.destination);\n" +
+      "    builder.proxyAddress(P.proxyAddress);\n" +
+      "    builder.authToken('-');\n" +
+      "    builder.username(P.username);\n" +
+      "    builder.password(P.password);\n" +
+      "    builder.desktopSize(new DesktopSize(canvas.width, canvas.height));\n" +
+      "    builder.renderCanvas(canvas);\n" +
+      "    // Remote cursor: IronRDP calls this with (kind, data, hotX, hotY)\n" +
+      "    // where kind ∈ { 'default', 'hidden', 'url' } and for 'url' the\n" +
+      "    // data arg is a base64 PNG data URL. Apply it to the canvas so\n" +
+      "    // the browser shows whichever cursor the remote session has.\n" +
+      "    builder.setCursorStyleCallback(function() {});\n" +
+      "    builder.setCursorStyleCallbackContext({});\n" +
+      "    builder.canvasResizedCallback(function() { /* re-sync canvas size if desired */ });\n" +
+      "\n" +
+      "    // Clipboard sync between remote and local browser is disabled —\n" +
+      "    // IronRDP's cliprdr state machine gets confused by our rdpsnd\n" +
+      "    // channel injection (it expects only the channels it asked for,\n" +
+      "    // and extra ones block it from reaching Ready state). A proper\n" +
+      "    // fix needs us to impersonate the WASM on rdpsnd — substantial\n" +
+      "    // work. For now clipboard is a one-sided affair: remote can copy\n" +
+      "    // and paste within itself, local can copy and paste within the\n" +
+      "    // browser, but nothing crosses.\n" +
+      "    builder.remoteClipboardChangedCallback(function() {});\n" +
+      "    builder.forceClipboardUpdateCallback(function() {});\n" +
+      "    var session = await builder.connect();\n" +
+      "    // Hold onto the WebSocket too so the window's onClose handler\n" +
+      "    // can tear down audio synchronously (window[paramKey] is\n" +
+      "    // deleted right after this script runs).\n" +
+      "    window[P.sessionKey] = { builder: builder, session: session, ws: _P0.ws };\n" +
+      "\n" +
+      "    // Sync canvas drawing buffer to the actual server desktop size.\n" +
+      "    try {\n" +
+      "      var ds = session.desktopSize();\n" +
+      "      if (ds && ds.width && ds.height) {\n" +
+      "        canvas.width  = ds.width;\n" +
+      "        canvas.height = ds.height;\n" +
+      "      }\n" +
+      "      if (ds && ds.free) ds.free();\n" +
+      "    } catch(_) {}\n" +
+      "    // Recompute CSS transform scale now that canvas size is known.\n" +
+      "    if (canvas.parentElement && canvas.parentElement.parentElement) {\n" +
+      "      var ctn = canvas.parentElement.parentElement;\n" +
+      "      if (ctn._fitWrap) ctn._fitWrap();\n" +
+      "    }\n" +
+      "\n" +
+      "    wireInputs(session);\n" +
+      "    status.style.display = 'none';\n" +
+      "    canvas.focus();\n" +
+      "    await session.run();\n" +
+      "  } catch (e) {\n" +
+      "    var msg = describeErr(e);\n" +
+      "    console.error('RDP error detail:', msg);\n" +
+      "    // Swallow cliprdr errors so a remote copy action doesn't\n" +
+      "    // visibly crash the session. (The session's render loop has\n" +
+      "    // already exited inside the WASM — canvas freezes either way,\n" +
+      "    // but we avoid the red overlay and let the user close the\n" +
+      "    // window cleanly.)\n" +
+      "    if (msg && msg.indexOf('cliprdr') >= 0) {\n" +
+      "      console.warn('[rdp] cliprdr failure suppressed:', msg);\n" +
+      "      status.textContent = 'Clipboard error — session may be degraded. ' +\n" +
+      "        'Close and reconnect to fully recover.';\n" +
+      "      status.style.color = '#ffb347';\n" +
+      "      status.style.display = '';\n" +
+      "    } else {\n" +
+      "      fail(msg);\n" +
+      "    }\n" +
+      "  }\n" +
+      "})();\n" +
+      "delete window['" + paramKey + "'];\n";
+    document.body.appendChild(script);
+  },
+
   // Context menu
   showContextMenu(e, item) {
     const menu = document.getElementById('context-menu');
@@ -9559,6 +10123,24 @@ const App = {
     // Open in New Tab — show for single non-directory items
     var newTabItem = menu.querySelector('[data-action="open-new-tab"]');
     newTabItem.hidden = item.isDir || FileList.selected.size > 1;
+
+    // Download / Download as Zip — visibility depends on selection shape and platform.
+    // Mobile: just "Download" (downloadFiles silently zips when needed).
+    // Desktop: per-file loop only works for plain files; show "Download as Zip" when
+    // any directory is selected, or when 2+ items are selected. Hide plain "Download"
+    // when the selection includes a directory (it would silently drop folders).
+    var dlItem = menu.querySelector('[data-action="download"]');
+    var dlZipItem = menu.querySelector('[data-action="download-zip"]');
+    var actionItemsForDl = this._getActionItems(item);
+    var dlHasDir = actionItemsForDl.some(function(it) { return it.isDir; });
+    var dlMulti = actionItemsForDl.length > 1;
+    if (Input.isMobile) {
+      dlItem.hidden = false;
+      dlZipItem.hidden = true;
+    } else {
+      dlItem.hidden = dlHasDir;
+      dlZipItem.hidden = !(dlHasDir || dlMulti);
+    }
 
     // Enable/disable paste
     const pasteItem = menu.querySelector('[data-action="paste"]');
@@ -10005,10 +10587,10 @@ const App = {
         window.open(window.location.pathname + '?file=' + encodeURIComponent(item.href), '_blank');
         break;
       case 'download':
-        for (const i of items.filter(i => !i.isDir)) {
-          this.downloadFile(i);
-          await new Promise(r => setTimeout(r, 200));
-        }
+        await this.downloadFiles(items);
+        break;
+      case 'download-zip':
+        await this.downloadAsZip(items);
         break;
       case 'rename':
         // Rename only makes sense for a single item
@@ -10088,12 +10670,61 @@ const App = {
     a.remove();
   },
 
-  async downloadSelected() {
-    const items = FileList.getSelected().filter(i => !i.isDir);
-    for (const item of items) {
-      this.downloadFile(item);
-      await new Promise(r => setTimeout(r, 200)); // Small delay between downloads
+  // Smart dispatcher: a single file goes direct; selections containing any
+  // directory always zip (HTML5 download can't recurse); on mobile, multi-file
+  // selections also zip (Chrome rejects multiple sequential downloads in one
+  // gesture). Otherwise fall back to a per-file loop on desktop.
+  async downloadFiles(items) {
+    if (!items || !items.length) return;
+    const hasDir = items.some(i => i.isDir);
+    if (items.length === 1 && !hasDir) {
+      this.downloadFile(items[0]);
+      return;
     }
+    if (hasDir || Input.isMobile) {
+      await this.downloadAsZip(items);
+      return;
+    }
+    for (const i of items) {
+      this.downloadFile(i);
+      await new Promise(r => setTimeout(r, 200));
+    }
+  },
+
+  async downloadAsZip(items) {
+    if (!items || !items.length) return;
+    const paths = items.map(i => i.href);
+    const t = Toast.show('Preparing zip…', null, 0);
+    let resp, data;
+    try {
+      resp = await fetch(this.davUrl + '_zip-stream', {
+        method: 'POST', credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ paths })
+      });
+      data = await resp.json();
+    } catch(e) {
+      if (t && t.remove) t.remove();
+      Toast.error('Zip preparation failed: ' + (e.message || 'connection error'));
+      return;
+    }
+    if (t && t.remove) t.remove();
+    if (!resp.ok || !data || !data.ok || !data.token) {
+      Toast.error('Zip preparation failed: ' + ((data && data.error) || resp.status));
+      return;
+    }
+    // Trigger the actual download via a normal GET — handled by rampart's file-server,
+    // which is robust for large transfers (Range support, single tcp stream, etc.).
+    const a = document.createElement('a');
+    a.href = this.davUrl + '_zip-stream/' + data.token;
+    a.download = data.name || 'download.zip';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  },
+
+  async downloadSelected() {
+    await this.downloadFiles(FileList.getSelected());
     FileList.clearSelection();
   },
 
@@ -11999,12 +12630,12 @@ const App = {
               ' title="' + (isSelf ? 'Cannot delete yourself' : u.admin ? 'Demote from admin first' : 'Delete user (files preserved)') + '">Delete</button>' +
             '<button class="btn btn-sm admin-btn-term' + (u.terminal ? ' active' : '') + '" data-user="' + _escAttr(u.username) + '"' +
               ' title="' + (u.terminal ? 'Disable terminal' : 'Enable terminal') + '">' + (u.terminal ? 'Term \u2713' : 'Term') + '</button>' +
-            '<button class="btn btn-sm admin-btn-vnc' + (u.vnc ? ' active' : '') + '" data-user="' + _escAttr(u.username) + '"' +
-              ' title="' + (u.vnc ? 'Disable VNC' : 'Enable VNC') + '">' + (u.vnc ? 'VNC* \u2713' : 'VNC*') + '</button>' +
+            '<button class="btn btn-sm admin-btn-remote' + (u.remote ? ' active' : '') + '" data-user="' + _escAttr(u.username) + '"' +
+              ' title="' + (u.remote ? 'Disable remote desktop' : 'Enable remote desktop') + '">' + (u.remote ? 'Remote \u2713' : 'Remote') + '</button>' +
           '</td></tr>';
       });
       html += '</tbody></table>';
-      html += '<p style="font-size:11px;color:var(--color-fg-secondary);margin-top:6px">* VNC is experimental. Connection to some VNC servers may fail due to encoding incompatibilities.</p>';
+      html += '<p style="font-size:11px;color:var(--color-fg-secondary);margin-top:6px">Remote Desktop covers both VNC and RDP. VNC connections to some servers may fail due to encoding incompatibilities.</p>';
       container.innerHTML = html;
 
       // Wire up action buttons
@@ -12021,8 +12652,8 @@ const App = {
       container.querySelectorAll('.admin-btn-term').forEach(function(btn) {
         btn.addEventListener('click', function() { self._adminToggleTerminal(btn.dataset.user); });
       });
-      container.querySelectorAll('.admin-btn-vnc').forEach(function(btn) {
-        btn.addEventListener('click', function() { self._adminToggleVnc(btn.dataset.user); });
+      container.querySelectorAll('.admin-btn-remote').forEach(function(btn) {
+        btn.addEventListener('click', function() { self._adminToggleRemote(btn.dataset.user); });
       });
     } catch (e) {
       container.innerHTML = '<p style="color:var(--color-danger)">Failed to load users</p>';
@@ -12214,16 +12845,16 @@ const App = {
     } catch (e) { Toast.error('Connection error'); }
   },
 
-  async _adminToggleVnc(username) {
+  async _adminToggleRemote(username) {
     try {
-      const resp = await fetch(this.davUrl + '_admin/vnc', {
+      const resp = await fetch(this.davUrl + '_admin/remote', {
         method: 'POST', credentials: 'same-origin',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ username: username })
       });
       const data = await resp.json();
       if (data.ok) {
-        Toast.show('VNC ' + (data.vnc ? 'enabled' : 'disabled') + ' for ' + username);
+        Toast.show('Remote desktop ' + (data.remote ? 'enabled' : 'disabled') + ' for ' + username);
         this._loadAdminUserList();
       } else { Toast.error(data.error || 'Failed'); }
     } catch (e) { Toast.error('Connection error'); }

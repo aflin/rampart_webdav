@@ -5051,7 +5051,10 @@ function main_dispatch(req) {
                 userGroups: (settingsRecord && settingsRecord.groups) || [],
                 theme: (settingsRecord && settingsRecord.theme) || 'auto',
                 terminal: DEMO_MODE ? false : !!(settingsRecord && settingsRecord.terminal),
-                vnc: DEMO_MODE ? false : !!(settingsRecord && settingsRecord.vnc),
+                // Unified Remote Desktop permission (covers VNC + RDP). For
+                // users whose records still have the old per-protocol flags
+                // set, fall back to either so access isn't silently lost.
+                remote: DEMO_MODE ? false : !!(settingsRecord && (settingsRecord.remote || settingsRecord.vnc || settingsRecord.rdp)),
                 termTheme: (settingsRecord && settingsRecord.termTheme) || 'auto',
                 cmTheme: (settingsRecord && settingsRecord.cmTheme) || 'auto',
                 ooAutosave: settingsRecord && typeof settingsRecord.ooAutosave === 'boolean' ? settingsRecord.ooAutosave : true,
@@ -5329,7 +5332,7 @@ function main_dispatch(req) {
                     created: au.created || null,
                     groups: au.groups || [],
                     terminal: !!au.terminal,
-                    vnc: !!au.vnc
+                    remote: !!(au.remote || au.vnc || au.rdp)
                 });
             }
         }
@@ -5491,26 +5494,32 @@ function main_dispatch(req) {
         return { status: 200, json: {ok: true, terminal: ttRecord.terminal} };
     }
 
-    // Admin: POST /dav/_admin/vnc — toggle VNC access for a user
-    if (method === 'POST' && fullPath === DAV_PREFIX + '/_admin/vnc') {
+    // Admin: POST /dav/_admin/remote — toggle Remote Desktop (VNC+RDP)
+    // access for a user. Reads the effective state by OR-ing the unified
+    // `remote` flag with legacy per-protocol flags, flips it, then writes
+    // all three so the record is self-consistent under either reader.
+    if (method === 'POST' && fullPath === DAV_PREFIX + '/_admin/remote') {
         var adUser = authenticate(req);
         if (!adUser) return { status: 401, json: {ok: false, error: 'Not authenticated'} };
         if (!adUser.admin) return { status: 403, json: {ok: false, error: 'Admin required'} };
-        var vnBody;
-        try { vnBody = JSON.parse(bufferToString(req.body)); } catch(e) {
+        var rmBody;
+        try { rmBody = JSON.parse(bufferToString(req.body)); } catch(e) {
             return { status: 400, json: {ok: false, error: 'Invalid JSON'} };
         }
-        var vnUsername = (vnBody.username || '').trim();
-        if (!vnUsername) {
+        var rmUsername = (rmBody.username || '').trim();
+        if (!rmUsername) {
             return { status: 400, json: {ok: false, error: 'Username required'} };
         }
-        var vnRecord = db.get(userDbi, vnUsername);
-        if (!vnRecord) {
+        var rmRecord = db.get(userDbi, rmUsername);
+        if (!rmRecord) {
             return { status: 404, json: {ok: false, error: 'User not found'} };
         }
-        vnRecord.vnc = !vnRecord.vnc;
-        db.put(userDbi, vnUsername, vnRecord);
-        return { status: 200, json: {ok: true, vnc: vnRecord.vnc} };
+        var nextRemote = !(rmRecord.remote || rmRecord.vnc || rmRecord.rdp);
+        rmRecord.remote = nextRemote;
+        rmRecord.vnc    = nextRemote;
+        rmRecord.rdp    = nextRemote;
+        db.put(userDbi, rmUsername, rmRecord);
+        return { status: 200, json: {ok: true, remote: nextRemote} };
     }
 
     // Admin: GET /dav/_admin/groups — list all groups with members
@@ -5945,6 +5954,119 @@ function main_dispatch(req) {
         try { var fs2 = stat(arcDestFs); if (fs2) arcFinalSize = fs2.size; } catch(e) {}
 
         return { status: 200, json: {ok: true, sync: true, size: arcFinalSize} };
+    }
+
+    // Two-step zip download:
+    //   1. POST /dav/_zip-stream         body {paths:[...]}  → creates zip in /tmp, returns {ok, token, name}
+    //   2. GET  /dav/_zip-stream/<token> → serves the zip via rampart's file-serving (range support, etc.)
+    // We split into POST+GET because some networks reliably fail on large POST responses
+    // (CONTENT_LENGTH_MISMATCH mid-stream). GET file-serving is the well-tested path.
+    if (method === 'GET' && fullPath.indexOf(DAV_PREFIX + '/_zip-stream/') === 0) {
+        var zfTok = fullPath.substring((DAV_PREFIX + '/_zip-stream/').length);
+        if (!/^[a-f0-9]+$/.test(zfTok)) return { status: 400, txt: 'Bad token' };
+        var zfRec = rampart.thread.get('zipstream_' + zfTok);
+        if (!zfRec) return { status: 404, txt: 'Token expired or invalid' };
+        var zfStat = stat(zfRec.path);
+        if (!zfStat || zfStat.size === 0) {
+            rampart.thread.put('zipstream_' + zfTok, null);
+            return { status: 404, txt: 'Zip no longer available' };
+        }
+        return {
+            status: 200,
+            headers: {
+                'Content-Type': 'application/zip',
+                'Content-Disposition': 'attachment; filename="' + encodeURIComponent(zfRec.name) + '"'
+            },
+            txt: '@' + zfRec.path,
+            noRangeCap: true
+        };
+    }
+
+    if (method === 'POST' && fullPath === DAV_PREFIX + '/_zip-stream') {
+        var zsUser = authenticate(req);
+        if (!zsUser) return { status: 401, json: {ok: false, error: 'Not authenticated'} };
+        var zsBody;
+        try { zsBody = JSON.parse(bufferToString(req.body)); } catch(e) {
+            return { status: 400, json: {ok: false, error: 'Invalid JSON'} };
+        }
+        var zsPaths = zsBody.paths;
+        if (!zsPaths || !zsPaths.length) {
+            return { status: 400, json: {ok: false, error: 'Missing paths'} };
+        }
+
+        // Resolve sources, enforce shared parent dir (zip is invoked with cd <base>)
+        var zsNames = [];
+        var zsBaseFs = null;
+        for (var zsi = 0; zsi < zsPaths.length; zsi++) {
+            var zsRel = getDavRelPath(zsPaths[zsi].replace(/\/$/, ''));
+            var zsFs = buildFsPath(zsRel);
+            if (!zsFs) return { status: 400, json: {ok: false, error: 'Invalid source path: ' + zsPaths[zsi]} };
+            if (!stat(zsFs) && !lstat(zsFs)) {
+                return { status: 404, json: {ok: false, error: 'Source not found: ' + zsPaths[zsi]} };
+            }
+            if (!checkAllowedPath(zsFs)) {
+                return { status: 403, json: {ok: false, error: 'Source path not allowed'} };
+            }
+            if (!authorize(zsUser, zsRel, 'GET')) {
+                return { status: 403, json: {ok: false, error: 'No read access to source'} };
+            }
+            var zsParent = zsFs.substring(0, zsFs.lastIndexOf('/'));
+            var zsName = zsFs.substring(zsFs.lastIndexOf('/') + 1);
+            if (zsBaseFs === null) {
+                zsBaseFs = zsParent;
+            } else if (zsBaseFs !== zsParent) {
+                return { status: 400, json: {ok: false, error: 'All sources must be in the same directory'} };
+            }
+            zsNames.push(zsName);
+        }
+
+        // Choose a download filename
+        var zsDownloadName;
+        if (zsNames.length === 1) {
+            // Single source: use its name with .zip
+            zsDownloadName = zsNames[0] + '.zip';
+        } else {
+            // Multi: name after the parent directory, fallback "files"
+            var zsBaseName = zsBaseFs.substring(zsBaseFs.lastIndexOf('/') + 1) || 'files';
+            zsDownloadName = zsBaseName + '.zip';
+        }
+
+        // Build zip into /tmp, read back, delete, return
+        var zsTempPath = '/tmp/.~zip-stream-' + Date.now() + '-' + hexify(crypto.rand(4)) + '.zip';
+        var zsCmd = 'cd ' + _shellEscape(zsBaseFs) + ' && zip -r ' + _shellEscape(zsTempPath);
+        for (var zsj = 0; zsj < zsNames.length; zsj++) {
+            zsCmd += ' ' + _shellEscape(zsNames[zsj]);
+        }
+        fprintf(stderr, '[zip-stream] start: %s\n', zsCmd);
+        var zsT0 = Date.now();
+        var zsShellRes;
+        var zsShellErr = '';
+        try {
+            zsShellRes = shell(zsCmd, {timeout: 300000});
+        } catch(e) { zsShellErr = e.message || String(e); }
+        fprintf(stderr, '[zip-stream] done in %dms err=%s\n', Date.now() - zsT0, zsShellErr || 'none');
+
+        var zsTempStat = stat(zsTempPath);
+        if (!zsTempStat || zsTempStat.size === 0) {
+            try { if (stat(zsTempPath)) rmFile(zsTempPath); } catch(e2) {}
+            var zsErrMsg = 'Zip creation failed';
+            if (zsShellErr) zsErrMsg += ': ' + zsShellErr;
+            else if (zsShellRes && zsShellRes.stderr) zsErrMsg += ': ' + bufferToString(zsShellRes.stderr).substring(0, 500);
+            return { status: 500, json: {ok: false, error: zsErrMsg} };
+        }
+
+        // Stash a token mapping to the temp file; client GETs /dav/_zip-stream/<token>
+        // to actually receive the bytes via rampart's file-serving path.
+        var zsTok = hexify(crypto.rand(16));
+        rampart.thread.put('zipstream_' + zsTok, { path: zsTempPath, name: zsDownloadName });
+        // Schedule cleanup: remove temp + token after enough time for the GET to complete.
+        // Linux open-fd semantics keep the file readable mid-transfer even if unlinked.
+        setTimeout(function(tok, p) {
+            try { if (stat(p)) rmFile(p); } catch(e) {}
+            rampart.thread.put('zipstream_' + tok, null);
+        }, 30 * 60 * 1000, zsTok, zsTempPath);
+
+        return { status: 200, json: { ok: true, token: zsTok, name: zsDownloadName } };
     }
 
     // Symlink creation: POST /dav/_symlink
