@@ -8935,15 +8935,23 @@ const App = {
 
       if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT' || e.target.isContentEditable) return;
 
+      // Remote-session windows (VNC, RDP, terminal) own ALL keystrokes including
+      // Ctrl+letter shortcuts — Ctrl+C must interrupt a remote process, not copy
+      // file-manager selections. Bail out before any global shortcut runs.
+      var focusedWin = WinManager.getFocusedWindow();
+      if (focusedWin && (focusedWin.type === 'vnc' || focusedWin.type === 'rdp' || focusedWin.type === 'terminal')) {
+        return;
+      }
+
       // '/' key opens search bar — only when no window is focused
-      if (e.key === '/' && !WinManager.getFocusedWindow()) {
+      if (e.key === '/' && !focusedWin) {
         e.preventDefault();
         Search.showInput();
         return;
       }
 
       // Don't intercept navigation keys when a viewer window is focused
-      var hasWin = WinManager.getFocusedWindow();
+      var hasWin = focusedWin;
       if (hasWin && !e.ctrlKey && !e.metaKey && (e.key === 'ArrowDown' || e.key === 'ArrowUp' || e.key === ' ' || e.key === 'Enter' || e.key === 'Backspace')) return;
 
       if (e.key === 'Delete' && FileList.selected.size > 0) {
@@ -9851,6 +9859,37 @@ const App = {
       "  rfb.showDotCursor = true;\n" +
       "  rfb.addEventListener('connect', function() {\n" +
       "    container.style.background = 'none';\n" +
+      "  });\n" +
+      "  // Modifier-state sync — workaround for Firefox (and some Chromium configs) on\n" +
+      "  // Linux where Ctrl/Alt/Shift/Meta keydown events are dropped: only the keyup\n" +
+      "  // fires, and on a modifier+key combo only the non-modifier key's keydown fires\n" +
+      "  // (with ctrlKey/altKey/etc set on the event). noVNC's modifier tracking relies\n" +
+      "  // on the keydown event, so without this Ctrl+C sends a bare 'c' to the remote.\n" +
+      "  // We diff ev.ctrlKey/altKey/shiftKey/metaKey against our own tracked state on\n" +
+      "  // every key event and inject the missing modifier DOWN/UP via rfb.sendKey().\n" +
+      "  var _modKs   = { Control: 0xffe3, Alt: 0xffe9, Shift: 0xffe1, Meta: 0xffe7 };\n" +
+      "  var _modCode = { Control: 'ControlLeft', Alt: 'AltLeft', Shift: 'ShiftLeft', Meta: 'MetaLeft' };\n" +
+      "  var _modState = { Control: false, Alt: false, Shift: false, Meta: false };\n" +
+      "  function _syncMods(ev) {\n" +
+      "    var now = { Control: !!ev.ctrlKey, Alt: !!ev.altKey, Shift: !!ev.shiftKey, Meta: !!ev.metaKey };\n" +
+      "    for (var m in now) {\n" +
+      "      if (now[m] !== _modState[m]) {\n" +
+      "        try { rfb.sendKey(_modKs[m], _modCode[m], now[m]); } catch(_) {}\n" +
+      "        _modState[m] = now[m];\n" +
+      "      }\n" +
+      "    }\n" +
+      "  }\n" +
+      "  document.addEventListener('keydown', _syncMods, true);\n" +
+      "  document.addEventListener('keyup',   _syncMods, true);\n" +
+      "  // Clear tracked modifier state when the window loses focus, so we don't think\n" +
+      "  // Ctrl is still held after returning from another app.\n" +
+      "  window.addEventListener('blur', function() {\n" +
+      "    for (var m in _modState) {\n" +
+      "      if (_modState[m]) {\n" +
+      "        try { rfb.sendKey(_modKs[m], _modCode[m], false); } catch(_) {}\n" +
+      "        _modState[m] = false;\n" +
+      "      }\n" +
+      "    }\n" +
       "  });\n" +
       "  rfb.addEventListener('disconnect', function(e) {\n" +
       "    var msg = (e.detail && e.detail.reason) || 'VNC connection lost';\n" +
