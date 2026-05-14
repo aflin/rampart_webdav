@@ -1180,8 +1180,19 @@ if(module && module.exports) {
                             [davRelPath, title, text, Math.floor(fsStat.mtime / 1000), fsStat.size]);
                     }
 
-                    // Recursively scan and index a directory
-                    function doScan(fsBase, davRelBase) {
+                    // Recursively scan and index a directory.
+                    // `visited` tracks canonical (realPath) paths already seen during *this*
+                    // scan, so a symlink that leads back into the tree (or to an out-of-tree
+                    // location reachable via two routes) is descended into at most once.
+                    // This prevents infinite recursion via circular symlinks and stops the
+                    // same physical file from being indexed twice under different dav paths.
+                    function doScan(fsBase, davRelBase, visited) {
+                        if (!visited) visited = {};
+                        var baseReal;
+                        try { baseReal = u.realPath(fsBase); } catch(e) { return; }
+                        if (visited[baseReal]) return;
+                        visited[baseReal] = true;
+
                         var entries;
                         try { entries = u.readdir(fsBase, true); } catch(e) {
                             log("scan readdir error for " + davRelBase + ": " + e.message);
@@ -1195,9 +1206,19 @@ if(module && module.exports) {
                             var childDav = davRelBase.replace(/\/?$/, '/') + ename;
                             var childSt = u.stat(childFs);
                             if (!childSt) continue;
+
+                            // Resolve to canonical path; broken symlinks fail here and are skipped.
+                            var childReal;
+                            try { childReal = u.realPath(childFs); } catch(e) { continue; }
+                            if (visited[childReal]) {
+                                log("skip already-visited (symlink): " + childDav + " -> " + childReal);
+                                continue;
+                            }
+
                             if (childSt.isDirectory) {
-                                doScan(childFs, childDav);
+                                doScan(childFs, childDav, visited);
                             } else {
+                                visited[childReal] = true;
                                 doIndex(childFs, childDav);
                             }
                         }
