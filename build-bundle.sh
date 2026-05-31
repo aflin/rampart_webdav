@@ -58,6 +58,7 @@ MODULES=(
     rampart-net             # network
     rampart-server          # http server
     rampart-sql             # full-text index / vector
+    rampart-sqlUpdate       # scheduled fulltext index updates (used by webdav.js)
     rampart-totext          # extract text from documents
     rampart-webserver       # web_server_conf launcher
 )
