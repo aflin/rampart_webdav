@@ -48,7 +48,7 @@ fi
 # Add or remove names below to control which rampart modules ship with the
 # bundle. Names are bare module identifiers (what you'd pass to require()).
 MODULES=(
-    rampart-almanac         # date / time
+    rampart-almanac         # probably not needed
     rampart-cmark           # markdown
     rampart-crypto          # passwords, hashing
     rampart-curl            # http client
@@ -61,6 +61,7 @@ MODULES=(
     rampart-sqlUpdate       # scheduled fulltext index updates (used by webdav.js)
     rampart-totext          # extract text from documents
     rampart-webserver       # web_server_conf launcher
+    rampart-html            # needed by totext
 )
 
 MODULES_PATH="$(rampart -c 'rampart.utils.printf("%s", process.modulesPath)' 2>/dev/null || true)"
