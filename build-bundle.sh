@@ -112,6 +112,21 @@ if [ "${#missing[@]}" -gt 0 ]; then
     printf '  %s\n' "${missing[@]}" >&2
 fi
 
+# Helper binaries that rampart's native modules auto-extract from the zip
+# at runtime.  texislockd is the SQL/vector-index lock daemon — without it
+# in the bundle, rampart-sql.so fails when it tries to spawn the lock daemon.
+RAMPART_BIN_DIR="$(dirname "$RAMPART")"
+HELPERS=( texislockd )
+for h in "${HELPERS[@]}"; do
+    src="$RAMPART_BIN_DIR/$h"
+    if [ -f "$src" ]; then
+        echo "Copying helper binary $h ..."
+        cp -a "$src" "$STAGE/"
+    else
+        echo "Warning: helper binary $h not found at $src" >&2
+    fi
+done
+
 # Strip noisy editor/scratch files so the bundle stays lean
 find "$STAGE" \( \
         -name '*.bak'  -o -name '*~'  -o -name '.DS_Store' -o \
