@@ -835,7 +835,12 @@ var SUPPORTED_METHODS = 'OPTIONS, GET, HEAD, PUT, DELETE, MKCOL, COPY, MOVE, PRO
  * ============================================================ */
 
 var SEARCH_DB_PATH = dataRoot + '/search_db';
-var SEARCH_LOG = process.scriptPath + '/logs/index.log';
+// Logs go to serverConf.logRoot when set (works for both on-disk installs and
+// single-file bundles, where process.scriptPath is ':zip:' and unwritable).
+// Fall back to <dataRoot>/../logs for the CLI-tool case.
+var SEARCH_LOG = (global.serverConf && global.serverConf.logRoot)
+    ? (global.serverConf.logRoot + '/index.log')
+    : (dataRoot.replace(/\/[^\/]+\/?$/, '') + '/logs/index.log');
 
 // File types that can be indexed (totext-supported + plain text subtitles)
 var SEARCH_EXTENSIONS = /\.(txt|html?|md|markdown|xml|rtf|tex|latex|csv|json|docx|pptx|xlsx|odt|odp|ods|epub|pdf|doc|srt|vtt)$/i;
@@ -7424,7 +7429,11 @@ function admin() {
             hash_line: result.line,
             admin: true,
             created: new Date().toISOString(),
-            groups: []
+            groups: [],
+            // First admin gets terminal + remote-desktop access by default.
+            // (Regular users still need these toggled on individually.)
+            terminal: true,
+            remote:   true
         });
         ensureUserHome(username);
 

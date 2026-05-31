@@ -8429,7 +8429,57 @@ const Viewers = {
     }
     if (cmPref !== 'auto') themeSelect.value = cmPref;
 
-    const actions = [saveBtn, saveAsBtn, dlBtn];
+    // ---- CodeMirror toolbar buttons (Search / Undo / Redo / Info) ----
+    // The CM bundle exposes basicSetup but not individual command functions
+    // (undo, redo, openSearchPanel). We trigger them by synthesizing a keydown
+    // on view.contentDOM — CodeMirror's keymap then runs the command exactly
+    // as it would for a real key press. Uses Cmd on macOS, Ctrl elsewhere so
+    // the platform-specific keymap binding fires.
+    const isMacKb = /Mac|iPod|iPhone|iPad/.test(navigator.platform);
+    const cmKey = function(view, ch, opts) {
+      if (!view) return;
+      opts = opts || {};
+      view.focus();
+      view.contentDOM.dispatchEvent(new KeyboardEvent('keydown', {
+        key: ch.length === 1 ? ch : ch,
+        code: ch.length === 1 ? 'Key' + ch.toUpperCase() : ch,
+        keyCode: ch.toUpperCase().charCodeAt(0),
+        ctrlKey: !isMacKb,
+        metaKey: isMacKb,
+        shiftKey: !!opts.shift,
+        bubbles: true,
+        cancelable: true
+      }));
+    };
+    const modLbl = isMacKb ? '⌘' : 'Ctrl';
+
+    const searchBtn = document.createElement('button');
+    searchBtn.className = 'btn btn-sm';
+    searchBtn.textContent = 'Find';
+    searchBtn.title = 'Find / Replace (' + modLbl + '+F)';
+    searchBtn.addEventListener('click', function() { cmKey(editor, 'f'); });
+
+    const undoBtn = document.createElement('button');
+    undoBtn.className = 'btn btn-sm';
+    undoBtn.textContent = '↶';
+    undoBtn.title = 'Undo (' + modLbl + '+Z)';
+    undoBtn.addEventListener('click', function() { cmKey(editor, 'z'); });
+
+    const redoBtn = document.createElement('button');
+    redoBtn.className = 'btn btn-sm';
+    redoBtn.textContent = '↷';
+    redoBtn.title = 'Redo (' + modLbl + '+Shift+Z)';
+    redoBtn.addEventListener('click', function() { cmKey(editor, 'z', {shift: true}); });
+
+    const infoBtn = document.createElement('button');
+    infoBtn.className = 'btn btn-sm';
+    infoBtn.textContent = '?';
+    infoBtn.title = 'Keyboard shortcuts';
+    infoBtn.addEventListener('click', function() {
+      Viewers._showCmShortcuts(isMacKb);
+    });
+
+    const actions = [searchBtn, undoBtn, redoBtn, infoBtn, saveBtn, saveAsBtn, dlBtn];
     if (mdPreviewBtn) actions.push(mdPreviewBtn);
 
     // WYSIWYG edit button for HTML files
@@ -8631,6 +8681,78 @@ const Viewers = {
       console.warn('Failed to load CM theme ' + name + ':', e);
       return null;
     }
+  },
+
+  // Popup listing CodeMirror keyboard shortcuts, formatted for the user's OS.
+  _showCmShortcuts(isMac) {
+    var mod   = isMac ? '⌘' : 'Ctrl';
+    var alt   = isMac ? '⌥' : 'Alt';
+    var sh    = isMac ? '⇧' : 'Shift';
+    var sections = [
+      ['Editing', [
+        ['Save',                       mod + '+S'],
+        ['Undo',                       mod + '+Z'],
+        ['Redo',                       (isMac ? '⌘+⇧+Z' : 'Ctrl+Shift+Z   or   Ctrl+Y')],
+        ['Select all',                 mod + '+A'],
+        ['Select next match',          mod + '+D'],
+        ['Toggle line comment',        mod + '+/'],
+        ['Toggle block comment',       sh + '+' + alt + '+A'],
+        ['Move line up / down',        alt + '+↑ / ' + alt + '+↓'],
+        ['Duplicate line up / down',   sh + '+' + alt + '+↑ / ' + sh + '+' + alt + '+↓'],
+        ['Delete line',                mod + '+' + sh + '+K'],
+        ['Indent / dedent',            mod + '+] / ' + mod + '+['],
+      ]],
+      ['Find & Replace', [
+        ['Find',                       mod + '+F'],
+        ['Find next',                  'F3   or   ' + mod + '+G'],
+        ['Find previous',              sh + '+F3   or   ' + sh + '+' + mod + '+G'],
+        ['Replace',                    isMac ? '⌘+⌥+F' : 'Ctrl+H'],
+        ['Close find panel',           'Esc'],
+      ]],
+      ['Navigation', [
+        ['Doc start / end',            mod + '+Home / ' + mod + '+End'],
+        ['Word left / right',          isMac ? '⌥+← / ⌥+→' : 'Ctrl+← / Ctrl+→'],
+        ['Match bracket',              mod + '+' + sh + '+\\'],
+      ]],
+      ['Multi-cursor', [
+        ['Add cursor at click',        mod + '+Click'],
+        ['Add cursor above / below',   mod + '+' + alt + '+↑ / ' + mod + '+' + alt + '+↓'],
+      ]],
+      ['Folding (gutter triangles)', [
+        ['Fold / unfold at cursor',    mod + '+' + sh + '+[ / ' + mod + '+' + sh + '+]'],
+        ['Fold / unfold all',          mod + '+' + alt + '+[ / ' + mod + '+' + alt + '+]'],
+      ]],
+      ['Autocomplete', [
+        ['Trigger',                    mod + '+Space'],
+        ['Accept suggestion',          'Tab   or   Enter'],
+        ['Dismiss',                    'Esc'],
+      ]],
+    ];
+
+    var wrap = document.createElement('div');
+    wrap.style.cssText = 'font-size:13px;max-height:65vh;overflow:auto;padding:0 20px 0 4px';
+    sections.forEach(function(sec) {
+      var h = document.createElement('h3');
+      h.style.cssText = 'margin:14px 0 4px;font-size:13px;color:var(--color-accent)';
+      h.textContent = sec[0];
+      wrap.appendChild(h);
+      var table = document.createElement('table');
+      table.style.cssText = 'width:100%;border-collapse:collapse';
+      sec[1].forEach(function(row) {
+        var tr = document.createElement('tr');
+        var td1 = document.createElement('td');
+        td1.style.cssText = 'padding:3px 12px 3px 0;vertical-align:top';
+        td1.textContent = row[0];
+        var td2 = document.createElement('td');
+        td2.style.cssText = 'text-align:right;padding:3px 0;vertical-align:top;font-family:var(--font-mono, monospace);color:var(--color-fg-secondary);white-space:nowrap';
+        td2.textContent = row[1];
+        tr.appendChild(td1);
+        tr.appendChild(td2);
+        table.appendChild(tr);
+      });
+      wrap.appendChild(table);
+    });
+    Dialog.open('CodeMirror Shortcuts — ' + (isMac ? 'macOS' : 'Linux / Windows'), wrap);
   },
 
   async _loadCodeMirror() {
