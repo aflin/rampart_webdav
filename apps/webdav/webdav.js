@@ -946,9 +946,17 @@ function searchMovePath(oldDavRel, newDavRel) {
     // Path index: always update
     pathMovePath(oldDavRel, newDavRel);
 
-    // Doc content index: depends on indexed dirs
+    // Doc content index: depends on indexed dirs.
+    //
+    // Skip-named sources (e.g. the file manager's `.~upload-<rand>` temp
+    // files that are PUT then MOVEd into place) were never inserted into
+    // the docs table by their PUT — searchIndexFile bails on skip names.
+    // If we still treat them as "indexed" here, we'd dispatch a `move` op
+    // and run `UPDATE docs SET path = ?` that matches zero rows, leaving
+    // the newly-uploaded file unsearchable. Treat the source as unindexed
+    // so the destination gets a fresh index instead.
     var destIndexed = searchIsIndexed(newDavRel);
-    var srcIndexed = searchIsIndexed(oldDavRel);
+    var srcIndexed  = !searchSkipFile(oldPath) && searchIsIndexed(oldDavRel);
 
     if (destIndexed && srcIndexed) {
         indexQueuePush({op: 'move', oldPath: oldPath, newPath: newPath});
